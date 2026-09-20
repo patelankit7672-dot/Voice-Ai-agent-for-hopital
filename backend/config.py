@@ -18,6 +18,7 @@ deliberately omits the key. Use it for /api/health-style diagnostics.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -37,6 +38,38 @@ load_dotenv(BASE_DIR / ".env", override=False)
 # AssemblyAI endpoints (verified against the current official documentation:
 # https://www.assemblyai.com/docs/voice-agents/voice-agent-api)
 ASSEMBLYAI_BASE_URL = "https://agents.assemblyai.com"
+def _resolve_appointments_path() -> Path:
+    """
+    Where the flat-file appointment store lives.
+
+    Serverless platforms (Vercel, Lambda) mount the deployed bundle READ-ONLY;
+    only the system temp directory is writable. Writing into DATA_DIR there
+    raises OSError on every booking, so the store moves to temp.
+
+    That storage is also EPHEMERAL: each cold start and each new instance gets
+    an empty file, so bookings do not survive and are not shared between
+    instances. It keeps a serverless demo functional; it is not persistence.
+    A real deployment sets APPOINTMENTS_PATH to a mounted volume, or replaces
+    this store with a database.
+    """
+    override = os.getenv("APPOINTMENTS_PATH")
+    if override:
+        return Path(override)
+    serverless = os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME")
+    if serverless:
+        return Path(tempfile.gettempdir()) / "varanasi-appointments.json"
+    return DATA_DIR / "appointments.json"
+
+
+APPOINTMENTS_PATH = _resolve_appointments_path()
+
+# True when writes will not survive, so the UI can say so honestly.
+EPHEMERAL_STORAGE = bool(
+    not os.getenv("APPOINTMENTS_PATH")
+    and (os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
+)
+
+
 ASSEMBLYAI_TOKEN_URL = f"{ASSEMBLYAI_BASE_URL}/v1/token"
 ASSEMBLYAI_AGENTS_URL = f"{ASSEMBLYAI_BASE_URL}/v1/agents"
 ASSEMBLYAI_WS_URL = "wss://agents.assemblyai.com/v1/ws"
@@ -233,6 +266,8 @@ __all__ = [
     "Settings",
     "BASE_DIR",
     "DATA_DIR",
+    "APPOINTMENTS_PATH",
+    "EPHEMERAL_STORAGE",
     "FRONTEND_DIR",
     "ASSEMBLYAI_BASE_URL",
     "ASSEMBLYAI_TOKEN_URL",

@@ -20,7 +20,7 @@ import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from .config import DATA_DIR
+from .config import APPOINTMENTS_PATH as _CONFIG_APPOINTMENTS_PATH
 from .hospital_service import (
     IST,
     doctor_public_view,
@@ -35,7 +35,9 @@ from .hospital_service import (
 )
 from .models import OperationResult
 
-APPOINTMENTS_PATH = DATA_DIR / "appointments.json"
+# Resolved in config so serverless deployments (read-only bundle) land in a
+# writable directory instead of raising OSError on every booking.
+APPOINTMENTS_PATH = _CONFIG_APPOINTMENTS_PATH
 
 # How far ahead a patient may book.
 MAX_BOOKING_HORIZON_DAYS = 60

@@ -1034,3 +1034,63 @@ def test_echo_guard_is_anchored_to_audible_audio_not_the_turn_start():
     assert "Date.now() - app.replyStartedAt" not in app_js
     # The guard must consider synthesis still in flight, not just playback.
     assert "hindiSpeaker.pending > 0" in app_js
+
+
+# ---------------------------------------------------------------- deployment
+
+
+def test_serverless_store_moves_off_the_read_only_bundle(monkeypatch):
+    """
+    Vercel and Lambda mount the deployed bundle read-only; only the system
+    temp directory is writable. Writing into DATA_DIR there raises OSError on
+    every booking, so the store must relocate automatically.
+    """
+    import importlib
+    import tempfile
+
+    from backend import config
+
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.delenv("APPOINTMENTS_PATH", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.APPOINTMENTS_PATH.parent == Path(tempfile.gettempdir())
+        assert reloaded.EPHEMERAL_STORAGE is True
+    finally:
+        monkeypatch.delenv("VERCEL", raising=False)
+        importlib.reload(config)
+
+
+def test_explicit_store_path_wins_and_is_not_flagged_ephemeral(monkeypatch, tmp_path):
+    """A mounted volume is durable, so it must not be reported as ephemeral."""
+    import importlib
+
+    from backend import config
+
+    target = tmp_path / "appointments.json"
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("APPOINTMENTS_PATH", str(target))
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.APPOINTMENTS_PATH == target
+        assert reloaded.EPHEMERAL_STORAGE is False
+    finally:
+        monkeypatch.delenv("VERCEL", raising=False)
+        monkeypatch.delenv("APPOINTMENTS_PATH", raising=False)
+        importlib.reload(config)
+
+
+def test_health_reports_storage_durability(client):
+    assert client.get("/api/health").json()["ephemeral_storage"] is False
+
+
+def test_vercel_entrypoint_exports_the_real_app():
+    """The serverless entrypoint must re-export the app, not rebuild it."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from api.index import app as serverless_app
+
+    from backend.main import app as real_app
+
+    assert serverless_app is real_app

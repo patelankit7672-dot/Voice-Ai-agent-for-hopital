@@ -34,7 +34,13 @@ from .assemblyai_service import (
     websocket_url,
 )
 from .sarvam_service import SarvamError, synthesize_hindi
-from .config import AUDIO_ENCODING, AUDIO_SAMPLE_RATE, FRONTEND_DIR, settings
+from .config import (
+    AUDIO_ENCODING,
+    AUDIO_SAMPLE_RATE,
+    EPHEMERAL_STORAGE,
+    FRONTEND_DIR,
+    settings,
+)
 from .models import (
     AdminLoginRequest,
     HindiSpeechRequest,
@@ -169,6 +175,8 @@ async def health() -> HealthResponse:
         version=__version__,
         voice_ready=settings.has_api_key,
         demo_data=True,
+        # True on serverless, where bookings do not survive a cold start.
+        ephemeral_storage=EPHEMERAL_STORAGE,
     )
 
 

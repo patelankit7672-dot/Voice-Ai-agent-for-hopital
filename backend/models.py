@@ -69,6 +69,9 @@ class HealthResponse(BaseModel):
     version: str
     voice_ready: bool
     demo_data: bool = True
+    # True on serverless hosts, where the appointment store lives in a temp
+    # directory and does not survive a cold start.
+    ephemeral_storage: bool = False
 
 
 class VoiceTokenResponse(BaseModel):
