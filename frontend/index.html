@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Varanasi Hospital AI Voice Assistant — book appointments, find doctors and get hospital information by voice, in Hindi or English." />
+  <meta name="color-scheme" content="light dark" />
+  <!-- Apply the saved theme before first paint so the page never flashes light. -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('varanasi.theme');
+        var dark = saved ? saved === 'dark'
+          : window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (e) { /* storage blocked — light is a fine default */ }
+    })();
+  </script>
+  <title>Varanasi Hospital — AI Voice Assistant</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏥</text></svg>" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <!-- ══════════════════ EMERGENCY OVERLAY ══════════════════ -->
+  <div id="emergency-banner" class="emergency-banner" role="alert" aria-live="assertive" hidden>
+    <div class="emergency-banner__inner">
+      <div class="emergency-banner__icon" aria-hidden="true">🚨</div>
+      <div class="emergency-banner__body">
+        <h2 id="emergency-headline" class="emergency-banner__title">EMERGENCY — SEEK IMMEDIATE MEDICAL HELP</h2>
+        <ul id="emergency-instructions" class="emergency-banner__list"></ul>
+        <div class="emergency-banner__contacts">
+          <a class="emergency-call" href="tel:108">📞 Ambulance 108</a>
+          <a class="emergency-call" href="tel:112">📞 Emergency 112</a>
+          <button type="button" class="emergency-call emergency-call--ghost" data-action="handoff-emergency">
+            👤 Alert hospital staff
+          </button>
+        </div>
+        <p class="emergency-banner__note" id="emergency-note">
+          This assistant cannot send an ambulance. No help has been dispatched — please call.
+        </p>
+      </div>
+      <button type="button" class="emergency-banner__close" data-action="dismiss-emergency" aria-label="Dismiss emergency notice">✕</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════ HEADER ══════════════════ -->
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true">🏥</span>
+        <div class="brand__text">
+          <h1 class="brand__name">Varanasi Hospital</h1>
+          <p class="brand__sub">AI Voice Assistant</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <!-- Theme toggle — heart switch from Uiverse.io by barisdogansutcu -->
+        <div class="love" title="Switch between light and dark mode">
+          <input id="switch" type="checkbox" role="switch" aria-label="Dark mode" />
+          <label class="love-heart" for="switch">
+            <i class="left"></i>
+            <i class="right"></i>
+            <i class="bottom"></i>
+            <div class="round"></div>
+            <span class="sr-only">Dark mode</span>
+          </label>
+        </div>
+        <span class="demo-chip" title="All clinical data in this application is fictional demonstration data.">Demo data</span>
+        <button type="button" class="btn btn--emergency btn--sm" data-action="emergency">
+          <span aria-hidden="true">🚨</span> Emergency
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ══════════════════ SAFETY NOTICE ══════════════════ -->
+  <div class="notice-bar" role="note">
+    <div class="container">
+      <strong>This is not a medical service.</strong>
+      This assistant provides hospital information and administrative help only. It does not replace a doctor
+      or emergency medical professional. Please do not share unnecessary sensitive medical information.
+      For life-threatening emergencies, seek immediate medical assistance.
+    </div>
+  </div>
+
+  <main id="main" class="container main-grid">
+
+    <!-- ══════════════════ VOICE COLUMN ══════════════════ -->
+    <section class="card card--voice" aria-labelledby="voice-heading">
+      <h2 id="voice-heading" class="card__title">How can we help you today?</h2>
+      <p class="card__lead">Your 24/7 virtual hospital assistant</p>
+
+      <div class="mic-wrap">
+        <button type="button" id="mic-button" class="mic-button" aria-describedby="status-text">
+          <span class="mic-button__pulse" aria-hidden="true"></span>
+          <span class="mic-button__pulse mic-button__pulse--2" aria-hidden="true"></span>
+          <span class="mic-button__icon" aria-hidden="true">🎙️</span>
+          <span class="sr-only" id="mic-button-label">Start voice assistant</span>
+        </button>
+      </div>
+
+      <p class="status-line">
+        <span id="status-dot" class="status-dot status-dot--idle" aria-hidden="true"></span>
+        <span id="status-text" class="status-text" role="status" aria-live="polite">Disconnected</span>
+      </p>
+
+      <div class="mic-picker">
+        <label class="mic-picker__label" for="lang-select">Language</label>
+        <select id="lang-select" class="mic-picker__select">
+          <option value="auto">Auto-detect (Hindi or English)</option>
+          <option value="en">English only</option>
+          <option value="hi">हिंदी only (Hindi)</option>
+        </select>
+        <p class="mic-picker__note">
+          One language per conversation — the assistant will not mix them.
+          <span id="hindi-voice-note"></span>
+        </p>
+      </div>
+
+      <div class="mic-picker">
+        <label class="mic-picker__label" for="mic-select">Microphone</label>
+        <div class="mic-picker__row">
+          <select id="mic-select" class="mic-picker__select">
+            <option value="">Default microphone</option>
+          </select>
+          <button type="button" id="mic-test-button" class="btn btn--ghost btn--sm" data-action="test-mic">
+            Test
+          </button>
+        </div>
+        <div class="mic-meter" id="mic-meter" hidden>
+          <div class="mic-meter__bar"><div class="mic-meter__fill" id="mic-meter-fill"></div></div>
+        </div>
+        <p class="mic-picker__hint" id="mic-level-hint" hidden></p>
+      </div>
+
+      <div class="voice-actions">
+        <button type="button" id="start-button" class="btn btn--primary btn--block" data-action="toggle-voice">
+          <span aria-hidden="true">🎙️</span> <span id="start-button-text">Start Voice Assistant</span>
+        </button>
+        <button type="button" id="reconnect-button" class="btn btn--ghost btn--block" data-action="reconnect" hidden>
+          <span aria-hidden="true">🔄</span> Reconnect
+        </button>
+      </div>
+
+      <p class="mic-help" id="mic-help">
+        Talk naturally with our AI hospital assistant. Your browser will ask for microphone
+        permission — it is used only while a session is active, and audio is not stored by this demo.
+      </p>
+
+      <p class="lang-note" id="lang-note" hidden></p>
+
+      <div id="error-box" class="error-box" role="alert" hidden></div>
+    </section>
+
+    <!-- ══════════════════ CONVERSATION ══════════════════ -->
+    <section class="card card--transcript" aria-labelledby="transcript-heading">
+      <div class="card__head">
+        <h2 id="transcript-heading" class="card__title card__title--sm">Conversation</h2>
+        <button type="button" class="btn btn--text btn--sm" data-action="clear-transcript">Clear</button>
+      </div>
+
+      <div id="transcript" class="transcript" role="log" aria-live="polite" aria-label="Conversation transcript" tabindex="0">
+        <p class="transcript__empty" id="transcript-empty">
+          Your conversation will appear here. Try saying: <em>“I want to book an appointment with a cardiologist tomorrow.”</em>
+          or <em>“मुझे कल डॉक्टर से मिलना है।”</em>
+        </p>
+      </div>
+
+      <div id="tool-activity" class="tool-activity" aria-live="polite" hidden></div>
+    </section>
+
+    <!-- ══════════════════ SIDEBAR ══════════════════ -->
+    <aside class="sidebar">
+
+      <section class="card" aria-labelledby="quick-heading">
+        <h2 id="quick-heading" class="card__title card__title--sm">Quick actions</h2>
+        <div class="quick-grid">
+          <button type="button" class="quick" data-action="open-booking">
+            <span class="quick__icon" aria-hidden="true">📅</span>
+            <span class="quick__label">Book Appointment</span>
+          </button>
+          <button type="button" class="quick" data-action="open-doctors">
+            <span class="quick__icon" aria-hidden="true">👨‍⚕️</span>
+            <span class="quick__label">Find Doctor</span>
+          </button>
+          <button type="button" class="quick" data-action="open-departments">
+            <span class="quick__icon" aria-hidden="true">🏥</span>
+            <span class="quick__label">Departments</span>
+          </button>
+          <button type="button" class="quick quick--danger" data-action="emergency">
+            <span class="quick__icon" aria-hidden="true">🚨</span>
+            <span class="quick__label">Emergency</span>
+          </button>
+          <button type="button" class="quick" data-action="handoff">
+            <span class="quick__icon" aria-hidden="true">👤</span>
+            <span class="quick__label">Talk to Staff</span>
+          </button>
+          <button type="button" class="quick" data-action="open-my-appointments">
+            <span class="quick__icon" aria-hidden="true">🔎</span>
+            <span class="quick__label">My Appointments</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="appts-heading">
+        <div class="card__head">
+          <h2 id="appts-heading" class="card__title card__title--sm">My appointments</h2>
+        </div>
+        <p class="muted small">
+          Enter the phone number you booked with. You will only ever see your own appointments.
+        </p>
+        <form id="my-appts-form" class="mic-picker__row" autocomplete="off">
+          <label class="sr-only" for="my-phone">Your phone number</label>
+          <input id="my-phone" class="mic-picker__select" type="tel" inputmode="numeric"
+                 name="phone" placeholder="10-digit phone number" maxlength="20" required />
+          <button type="submit" class="btn btn--ghost btn--sm">Find</button>
+        </form>
+        <div id="appointments-list" class="appointments" aria-live="polite"></div>
+      </section>
+
+      <section class="card card--info" aria-labelledby="info-heading">
+        <h2 id="info-heading" class="card__title card__title--sm">Hospital information</h2>
+        <dl id="hospital-info" class="info-list">
+          <div class="info-list__row"><dt>Emergency</dt><dd>24/7 — walk-in</dd></div>
+          <div class="info-list__row"><dt>Outpatient</dt><dd>9:00 AM – 6:00 PM</dd></div>
+          <div class="info-list__row"><dt>Voice assistant</dt><dd>24/7</dd></div>
+        </dl>
+        <p class="muted small">Contact numbers and address are demo placeholders until replaced with real hospital details.</p>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>
+        <strong>Varanasi Hospital AI Voice Assistant</strong> — MVP demonstration built on the AssemblyAI Voice Agent API.
+      </p>
+      <p class="small muted">
+        All doctors, departments, schedules, fees and contact details shown are fictional demonstration data.
+        No HIPAA, DPDP, medical-device or clinical-validation claim is made. Not for real patient use.
+      </p>
+      <p class="small muted">
+        Hospital staff: <a href="/admin">open the staff portal →</a>
+      </p>
+    </div>
+  </footer>
+
+  <!-- ══════════════════ MODALS ══════════════════ -->
+
+  <!-- Book appointment -->
+  <div class="modal" id="modal-booking" role="dialog" aria-modal="true" aria-labelledby="booking-title" hidden>
+    <div class="modal__backdrop" data-action="close-modal"></div>
+    <div class="modal__panel" role="document">
+      <div class="modal__head">
+        <h2 id="booking-title">📅 Book an appointment</h2>
+        <button type="button" class="modal__close" data-action="close-modal" aria-label="Close">✕</button>
+      </div>
+      <form id="booking-form" class="form" novalidate>
+        <div class="form__row">
+          <label for="bk-name">Patient name <span class="req" aria-hidden="true">*</span></label>
+          <input type="text" id="bk-name" name="patient_name" required minlength="2" maxlength="80" autocomplete="name" placeholder="Full name" />
+        </div>
+        <div class="form__row">
+          <label for="bk-phone">Phone number <span class="req" aria-hidden="true">*</span></label>
+          <input type="tel" id="bk-phone" name="patient_phone" required inputmode="tel" maxlength="20" autocomplete="tel" placeholder="10-digit mobile number" />
+        </div>
+        <div class="form__row">
+          <label for="bk-department">Department</label>
+          <select id="bk-department" name="department">
+            <option value="">Any department</option>
+          </select>
+        </div>
+        <div class="form__row">
+          <label for="bk-doctor">Doctor <span class="req" aria-hidden="true">*</span></label>
+          <select id="bk-doctor" name="doctor_id" required>
+            <option value="">Select a doctor</option>
+          </select>
+        </div>
+        <div class="form__row form__row--split">
+          <div>
+            <label for="bk-date">Date <span class="req" aria-hidden="true">*</span></label>
+            <input type="date" id="bk-date" name="date" required />
+          </div>
+          <div>
+            <label for="bk-time">Time slot <span class="req" aria-hidden="true">*</span></label>
+            <select id="bk-time" name="time" required>
+              <option value="">Choose a doctor and date</option>
+            </select>
+          </div>
+        </div>
+        <p class="form__hint">Only administrative details are collected. Please do not enter medical information.</p>
+        <div id="booking-result" class="result-box" role="status" aria-live="polite" hidden></div>
+        <div class="modal__foot">
+          <button type="button" class="btn btn--ghost" data-action="close-modal">Cancel</button>
+          <button type="submit" class="btn btn--primary" id="booking-submit">Confirm booking</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Find doctor -->
+  <div class="modal" id="modal-doctors" role="dialog" aria-modal="true" aria-labelledby="doctors-title" hidden>
+    <div class="modal__backdrop" data-action="close-modal"></div>
+    <div class="modal__panel" role="document">
+      <div class="modal__head">
+        <h2 id="doctors-title">👨‍⚕️ Find a doctor</h2>
+        <button type="button" class="modal__close" data-action="close-modal" aria-label="Close">✕</button>
+      </div>
+      <div class="form">
+        <div class="form__row">
+          <label for="doc-search">Search by name, department or need</label>
+          <input type="search" id="doc-search" placeholder="e.g. cardiologist, skin, Dr Sharma" autocomplete="off" />
+        </div>
+        <div id="doctor-results" class="results" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Departments -->
+  <div class="modal" id="modal-departments" role="dialog" aria-modal="true" aria-labelledby="departments-title" hidden>
+    <div class="modal__backdrop" data-action="close-modal"></div>
+    <div class="modal__panel" role="document">
+      <div class="modal__head">
+        <h2 id="departments-title">🏥 Departments</h2>
+        <button type="button" class="modal__close" data-action="close-modal" aria-label="Close">✕</button>
+      </div>
+      <div class="form">
+        <div id="department-results" class="results" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- My appointments -->
+  <div class="modal" id="modal-lookup" role="dialog" aria-modal="true" aria-labelledby="lookup-title" hidden>
+    <div class="modal__backdrop" data-action="close-modal"></div>
+    <div class="modal__panel" role="document">
+      <div class="modal__head">
+        <h2 id="lookup-title">🔎 Find my appointment</h2>
+        <button type="button" class="modal__close" data-action="close-modal" aria-label="Close">✕</button>
+      </div>
+      <form id="lookup-form" class="form" novalidate>
+        <div class="form__row">
+          <label for="lk-reference">Appointment reference</label>
+          <input type="text" id="lk-reference" maxlength="40" placeholder="e.g. VH260919AB12" autocomplete="off" />
+        </div>
+        <p class="form__hint">— or —</p>
+        <div class="form__row">
+          <label for="lk-phone">Phone number used for booking</label>
+          <input type="tel" id="lk-phone" maxlength="20" inputmode="tel" placeholder="10-digit mobile number" />
+        </div>
+        <div id="lookup-result" class="result-box" role="status" aria-live="polite" hidden></div>
+        <div class="modal__foot">
+          <button type="button" class="btn btn--ghost" data-action="close-modal">Close</button>
+          <button type="submit" class="btn btn--primary">Search</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Handoff -->
+  <div class="modal" id="modal-handoff" role="dialog" aria-modal="true" aria-labelledby="handoff-title" hidden>
+    <div class="modal__backdrop" data-action="close-modal"></div>
+    <div class="modal__panel modal__panel--narrow" role="document">
+      <div class="modal__head">
+        <h2 id="handoff-title">👤 Talk to hospital staff</h2>
+        <button type="button" class="modal__close" data-action="close-modal" aria-label="Close">✕</button>
+      </div>
+      <div class="form">
+        <div id="handoff-result" class="result-box" role="status" aria-live="polite">
+          <p>Requesting a hospital staff member…</p>
+        </div>
+        <div class="modal__foot">
+          <button type="button" class="btn btn--primary" data-action="close-modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

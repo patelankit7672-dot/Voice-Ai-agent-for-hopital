@@ -1,0 +1,43 @@
+# ---- Secrets: NEVER commit these ----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Runtime / mutable demo data ----
+# The live booking store holds real names and phone numbers typed during
+# testing, so it is NEVER committed. appointments.example.json is the seed a
+# fresh clone starts from; the app creates the live file on first write.
+data/appointments.json
+data/appointments.local.json
+logs/
+*.log
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp

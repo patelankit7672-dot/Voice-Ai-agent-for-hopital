@@ -1,0 +1,4 @@
+{
+  "_notice": "DEMONSTRATION SEED. Copy to appointments.json to start with an empty store. Flat-file JSON storage for the MVP only. Not suitable for production - replace with a real database plus encryption at rest and an audit trail.",
+  "appointments": []
+}

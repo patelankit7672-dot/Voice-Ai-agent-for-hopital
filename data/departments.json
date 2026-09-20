@@ -1,0 +1,95 @@
+{
+  "_notice": "DEMONSTRATION DATA ONLY. Department descriptions, timings and floors are fictional placeholders for an MVP demo. Replace with verified hospital information before any real-world use.",
+  "_data_type": "demo",
+  "departments": [
+    {
+      "name": "Cardiology",
+      "description": "Diagnosis and treatment of heart and blood vessel conditions, including ECG, echocardiography and stress testing.",
+      "doctors": ["DOC001"],
+      "timings": "10:00 AM - 2:00 PM",
+      "floor": "2nd Floor, B Block",
+      "demo_record": true
+    },
+    {
+      "name": "General Medicine",
+      "description": "First point of care for fever, infections, diabetes, blood pressure and general adult health concerns.",
+      "doctors": ["DOC003", "DOC012"],
+      "timings": "9:00 AM - 7:00 PM",
+      "floor": "1st Floor, A Block",
+      "demo_record": true
+    },
+    {
+      "name": "Orthopedics",
+      "description": "Bone, joint, spine and sports-injury care, including fracture management and joint replacement consultation.",
+      "doctors": ["DOC005"],
+      "timings": "11:00 AM - 4:00 PM",
+      "floor": "3rd Floor, B Block",
+      "demo_record": true
+    },
+    {
+      "name": "Pediatrics",
+      "description": "Healthcare for infants, children and adolescents, including immunisation and growth monitoring.",
+      "doctors": ["DOC004"],
+      "timings": "10:00 AM - 2:00 PM",
+      "floor": "Ground Floor, D Block",
+      "demo_record": true
+    },
+    {
+      "name": "Gynecology",
+      "description": "Women's health, pregnancy care, antenatal check-ups and gynaecological consultation.",
+      "doctors": ["DOC002"],
+      "timings": "11:00 AM - 3:00 PM",
+      "floor": "1st Floor, C Block",
+      "demo_record": true
+    },
+    {
+      "name": "Dermatology",
+      "description": "Skin, hair and nail conditions, including allergy patch testing and cosmetic dermatology consultation.",
+      "doctors": ["DOC006"],
+      "timings": "12:00 PM - 4:00 PM",
+      "floor": "2nd Floor, C Block",
+      "demo_record": true
+    },
+    {
+      "name": "Neurology",
+      "description": "Disorders of the brain, spine and nervous system, including headache, epilepsy and stroke follow-up care.",
+      "doctors": ["DOC007"],
+      "timings": "2:00 PM - 6:00 PM",
+      "floor": "4th Floor, B Block",
+      "demo_record": true
+    },
+    {
+      "name": "ENT",
+      "description": "Ear, nose and throat care, including hearing assessment, sinus treatment and tonsil surgery consultation.",
+      "doctors": ["DOC008"],
+      "timings": "9:00 AM - 1:00 PM",
+      "floor": "2nd Floor, A Block",
+      "demo_record": true
+    },
+    {
+      "name": "Emergency",
+      "description": "24/7 emergency and trauma care. Walk-in only — no appointment is required or taken for emergency care.",
+      "doctors": ["DOC009"],
+      "timings": "24/7",
+      "floor": "Ground Floor, Emergency Wing",
+      "walk_in_only": true,
+      "demo_record": true
+    },
+    {
+      "name": "Radiology",
+      "description": "Diagnostic imaging services including X-Ray, ultrasound and CT scan, with same-day reporting for most studies.",
+      "doctors": ["DOC010"],
+      "timings": "9:00 AM - 5:00 PM",
+      "floor": "Ground Floor, Imaging Block",
+      "demo_record": true
+    },
+    {
+      "name": "Pathology",
+      "description": "Laboratory testing including blood, urine and tissue analysis, with home sample collection on request.",
+      "doctors": ["DOC011"],
+      "timings": "8:00 AM - 4:00 PM",
+      "floor": "Ground Floor, Lab Block",
+      "demo_record": true
+    }
+  ]
+}

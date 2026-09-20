@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Varanasi Hospital staff portal — appointments, doctor load and escalations." />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="color-scheme" content="light dark" />
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('varanasi.theme');
+        var dark = saved ? saved === 'dark'
+          : window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (e) { /* storage blocked — light is a fine default */ }
+    })();
+  </script>
+  <title>Staff Portal — Varanasi Hospital</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🩺</text></svg>" />
+</head>
+<body class="admin-body">
+  <a class="skip-link" href="#admin-main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="container site-header__inner">
+      <div class="brand">
+        <span class="brand__mark" aria-hidden="true">🩺</span>
+        <div class="brand__text">
+          <h1 class="brand__name">Staff Portal</h1>
+          <p class="brand__sub">Varanasi Hospital</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="love" title="Switch between light and dark mode">
+          <input id="switch" type="checkbox" role="switch" aria-label="Dark mode" />
+          <label class="love-heart" for="switch">
+            <i class="left"></i><i class="right"></i><i class="bottom"></i>
+            <div class="round"></div>
+            <span class="sr-only">Dark mode</span>
+          </label>
+        </div>
+        <span class="demo-chip" title="All clinical data here is fictional demonstration data.">Demo data</span>
+        <a class="btn btn--ghost btn--sm" href="/">← Patient app</a>
+        <button type="button" id="signout-button" class="btn btn--ghost btn--sm" data-action="signout" hidden>Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="notice-bar" role="note">
+    <div class="container">
+      <strong>Demonstration portal.</strong>
+      Access is a single shared passcode with no individual staff accounts, roles or audit trail,
+      and every record shown is fictional. This is not a clinical system and must not be used
+      for real patient information.
+    </div>
+  </div>
+
+  <main id="admin-main" class="container">
+
+    <!-- ══════════════ SIGN IN ══════════════ -->
+    <section id="login-view" class="card admin-login" aria-labelledby="login-heading" hidden>
+      <h2 id="login-heading" class="card__title">Staff sign-in</h2>
+      <p class="card__lead">Enter the passcode from the server's <code>.env</code> file.</p>
+      <form id="login-form" class="admin-login__form" autocomplete="off">
+        <label class="sr-only" for="passcode">Staff passcode</label>
+        <input id="passcode" class="mic-picker__select" type="password" name="passcode"
+               placeholder="Staff passcode" required autocomplete="current-password" />
+        <button type="submit" class="btn btn--primary">Sign in</button>
+      </form>
+      <p id="login-error" class="mic-picker__hint mic-picker__hint--bad" hidden></p>
+    </section>
+
+    <!-- ══════════════ PORTAL ══════════════ -->
+    <div id="portal-view" hidden>
+
+      <nav class="admin-tabs" aria-label="Portal sections">
+        <button type="button" class="admin-tab is-active" data-tab="dashboard">Dashboard</button>
+        <button type="button" class="admin-tab" data-tab="appointments">Appointments</button>
+        <button type="button" class="admin-tab" data-tab="doctors">Doctors</button>
+        <button type="button" class="admin-tab" data-tab="escalations">Escalations</button>
+      </nav>
+
+      <!-- Dashboard -->
+      <section id="tab-dashboard" class="admin-panel" aria-labelledby="dash-heading">
+        <div class="admin-panel__head">
+          <h2 id="dash-heading" class="card__title">Today at a glance</h2>
+          <span id="dash-stamp" class="admin-stamp"></span>
+        </div>
+        <div id="stat-grid" class="stat-grid"></div>
+        <div class="admin-split">
+          <div class="card">
+            <h3 class="card__title card__title--sm">Next appointments</h3>
+            <div id="next-up" class="results"></div>
+          </div>
+          <div class="card">
+            <h3 class="card__title card__title--sm">By department</h3>
+            <div id="by-department" class="bar-list"></div>
+            <h3 class="card__title card__title--sm" style="margin-top:1.2rem">Busiest doctors</h3>
+            <div id="by-doctor" class="bar-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Appointments -->
+      <section id="tab-appointments" class="admin-panel" aria-labelledby="appt-heading" hidden>
+        <div class="admin-panel__head">
+          <h2 id="appt-heading" class="card__title">Appointments</h2>
+          <button type="button" class="btn btn--ghost btn--sm" data-action="export">⭳ Export CSV</button>
+        </div>
+
+        <div class="card admin-filters">
+          <div class="admin-filters__row">
+            <label class="filter">
+              <span class="filter__label">Search</span>
+              <input id="f-query" class="mic-picker__select" type="search" placeholder="Name, phone or booking ID" />
+            </label>
+            <label class="filter">
+              <span class="filter__label">When</span>
+              <select id="f-scope" class="mic-picker__select">
+                <option value="upcoming">Upcoming</option>
+                <option value="today">Today</option>
+                <option value="past">Past</option>
+                <option value="">All dates</option>
+              </select>
+            </label>
+            <label class="filter">
+              <span class="filter__label">Status</span>
+              <select id="f-status" class="mic-picker__select">
+                <option value="">Any status</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="rescheduled">Rescheduled</option>
+                <option value="completed">Completed</option>
+                <option value="no_show">No show</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </label>
+            <label class="filter">
+              <span class="filter__label">Department</span>
+              <select id="f-department" class="mic-picker__select">
+                <option value="">All departments</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <p id="appt-count" class="admin-stamp"></p>
+        <div id="appt-list" class="results results--tall"></div>
+      </section>
+
+      <!-- Doctors -->
+      <section id="tab-doctors" class="admin-panel" aria-labelledby="doc-heading" hidden>
+        <div class="admin-panel__head">
+          <h2 id="doc-heading" class="card__title">Doctor load</h2>
+        </div>
+        <div id="doctor-board" class="results results--tall"></div>
+      </section>
+
+      <!-- Escalations -->
+      <section id="tab-escalations" class="admin-panel" aria-labelledby="esc-heading" hidden>
+        <div class="admin-panel__head">
+          <h2 id="esc-heading" class="card__title">Escalations</h2>
+        </div>
+        <p class="card__lead" id="esc-notice"></p>
+        <div class="admin-split">
+          <div class="card">
+            <h3 class="card__title card__title--sm">Emergency detections</h3>
+            <div id="emergency-log" class="results"></div>
+          </div>
+          <div class="card">
+            <h3 class="card__title card__title--sm">Staff handoff requests</h3>
+            <div id="handoff-log" class="results"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="admin-toast" class="admin-toast" role="status" aria-live="polite" hidden></div>
+
+  <footer class="site-footer">
+    <div class="container">
+      <strong>Varanasi Hospital — Staff Portal.</strong>
+      Demonstration software with fictional data. Not a medical device and not a clinical record system.
+    </div>
+  </footer>
+
+  <script src="/admin.js"></script>
+</body>
+</html>
