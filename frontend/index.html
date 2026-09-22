@@ -16,7 +16,7 @@
       } catch (e) { /* storage blocked — light is a fine default */ }
     })();
   </script>
-  <title>Varanasi Hospital — AI Voice Assistant</title>
+  <title>Arin — Varanasi Hospital Voice Assistant</title>
   <link rel="stylesheet" href="/style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏥</text></svg>" />
 </head>
@@ -52,7 +52,7 @@
         <span class="brand__mark" aria-hidden="true">🏥</span>
         <div class="brand__text">
           <h1 class="brand__name">Varanasi Hospital</h1>
-          <p class="brand__sub">AI Voice Assistant</p>
+          <p class="brand__sub">Arin · AI Voice Assistant</p>
         </div>
       </div>
       <div class="header-actions">
@@ -90,7 +90,7 @@
     <!-- ══════════════════ VOICE COLUMN ══════════════════ -->
     <section class="card card--voice" aria-labelledby="voice-heading">
       <h2 id="voice-heading" class="card__title">How can we help you today?</h2>
-      <p class="card__lead">Your 24/7 virtual hospital assistant</p>
+      <p class="card__lead">Arin, your 24/7 virtual hospital assistant</p>
 
       <div class="mic-wrap">
         <button type="button" id="mic-button" class="mic-button" aria-describedby="status-text">
@@ -117,6 +117,20 @@
           One language per conversation — the assistant will not mix them.
           <span id="hindi-voice-note"></span>
         </p>
+      </div>
+
+      <div class="mic-picker">
+        <label class="mic-picker__label" for="output-select">Audio output</label>
+        <p class="output-status" id="output-status">Checking audio devices…</p>
+        <div class="mic-picker__row">
+          <select id="output-select" class="mic-picker__select">
+            <option value="">System default</option>
+          </select>
+          <button type="button" id="test-voice-button" class="btn btn--ghost btn--sm" data-action="test-voice">
+            Test voice
+          </button>
+        </div>
+        <p class="mic-picker__note" id="output-note"></p>
       </div>
 
       <div class="mic-picker">
@@ -154,7 +168,7 @@
       </div>
 
       <p class="mic-help" id="mic-help">
-        Talk naturally with our AI hospital assistant. Your browser will ask for microphone
+        Talk naturally with Arin. Your browser will ask for microphone
         permission — it is used only while a session is active, and audio is not stored by this demo.
       </p>
 

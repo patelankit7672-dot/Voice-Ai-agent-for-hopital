@@ -1264,3 +1264,19 @@ input:checked + .love-heart .bottom {
   font-size: .76rem;
   color: var(--ink-500);
 }
+
+/* --- audio output status ---------------------------------------------- */
+
+.output-status {
+  margin: 0 0 .4rem;
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--ink-500);
+}
+.output-status--good { color: var(--green-700); }
+.output-status--warn { color: var(--amber-700); }
+
+.mic-picker__select:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}

@@ -42,9 +42,10 @@ const PLAYBACK_LEAD_SECONDS = 0.06;
 const STATUS = {
   idle:       { text: 'Disconnected',                      dot: 'idle',       mic: '' },
   connecting: { text: 'Connecting…',                       dot: 'connecting', mic: 'is-connecting' },
-  connected:  { text: 'Connected to Varanasi Hospital AI', dot: 'connected',  mic: 'is-listening' },
-  listening:  { text: 'Listening…',                        dot: 'listening',  mic: 'is-listening' },
-  speaking:   { text: 'Speaking…',                         dot: 'speaking',   mic: 'is-speaking' },
+  connected:  { text: 'Connected — Arin is ready',         dot: 'connected',  mic: 'is-listening' },
+  listening:  { text: '🎤 Arin is listening…',              dot: 'listening',  mic: 'is-listening' },
+  thinking:   { text: '🧠 Arin is thinking…',               dot: 'connecting', mic: 'is-connecting' },
+  speaking:   { text: '🔊 Arin is speaking…',               dot: 'speaking',   mic: 'is-speaking' },
   error:      { text: 'Disconnected',                      dot: 'error',      mic: '' },
 };
 
@@ -70,6 +71,9 @@ const el = {
   langNote:         $('#lang-note'),
   micSelect:        $('#mic-select'),
   audioSetup:       $('#audio-setup'),
+  outputSelect:     $('#output-select'),
+  outputStatus:     $('#output-status'),
+  outputNote:       $('#output-note'),
   audioSetupNote:   $('#audio-setup-note'),
   langSelect:       $('#lang-select'),
   micLevelHint:     $('#mic-level-hint'),
@@ -263,6 +267,111 @@ function agentIsAudible(tailMs = ECHO_GUARD_MS) {
   if (app.player.isPlaying) return true;
   return Date.now() - app.player.lastEnqueueAt < tailMs;
 }
+
+/* ------------------------------------------------------------------ *
+ * Audio output routing (headphones)
+ *
+ * Browsers choose the output device, not the page — unless the page asks.
+ * `setSinkId` is that ask, and support is uneven, so this handles three
+ * levels and is honest with the caller about which one they are on:
+ *
+ *   1. AudioContext.setSinkId — routes Web Audio directly. Cleanest.
+ *   2. HTMLMediaElement.setSinkId — playback is bridged through a
+ *      MediaStreamAudioDestinationNode into an <audio> element, which can be
+ *      pointed at a device.
+ *   3. Neither — the page cannot choose, and says so rather than pretending.
+ *
+ * Output only. The microphone graph is never touched by any of this: a
+ * caller can send audio from the laptop mic while hearing Arin in a headset.
+ * ------------------------------------------------------------------ */
+
+const OUTPUT_PREF_KEY = 'varanasi.audioOutput';
+
+const audioOutput = {
+  /** 'context' | 'element' | 'unsupported' */
+  support: 'unsupported',
+  deviceId: '',
+  sinkNode: null,
+  element: null,
+
+  detectSupport() {
+    if (typeof AudioContext !== 'undefined'
+        && typeof AudioContext.prototype.setSinkId === 'function') {
+      this.support = 'context';
+    } else if (typeof HTMLMediaElement !== 'undefined'
+        && typeof HTMLMediaElement.prototype.setSinkId === 'function') {
+      this.support = 'element';
+    } else {
+      this.support = 'unsupported';
+    }
+    return this.support;
+  },
+
+  /**
+   * Devices are only labelled after microphone permission has been granted
+   * once — before that the browser returns blank labels to prevent
+   * fingerprinting, so the list is not useful yet.
+   */
+  async list() {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter((d) => d.kind === 'audiooutput');
+    } catch {
+      return [];
+    }
+  },
+
+  /** Heuristic: does any output look like a headset? Labels vary by OS. */
+  looksLikeHeadphones(label) {
+    return /head(set|phone)|earphone|earbud|airpod|buds|hands[- ]?free/i.test(label || '');
+  },
+
+  /**
+   * Build the graph for the chosen device, returning the node the player
+   * should write into (or null to use ctx.destination directly).
+   */
+  async attach(ctx, deviceId) {
+    this.detach();
+    this.deviceId = deviceId || '';
+    if (!deviceId) return null;               // system default
+
+    if (this.support === 'context') {
+      try {
+        await ctx.setSinkId(deviceId);
+        return null;                          // Web Audio now targets it
+      } catch (err) {
+        console.warn('AudioContext.setSinkId failed:', err.message);
+      }
+    }
+
+    if (this.support === 'element') {
+      try {
+        const node = ctx.createMediaStreamDestination();
+        const el = new Audio();
+        el.srcObject = node.stream;
+        await el.setSinkId(deviceId);
+        await el.play();
+        this.sinkNode = node;
+        this.element = el;
+        return node;
+      } catch (err) {
+        console.warn('HTMLMediaElement.setSinkId failed:', err.message);
+        this.detach();
+      }
+    }
+
+    return null;                              // fall back to the default output
+  },
+
+  detach() {
+    if (this.element) {
+      try { this.element.pause(); this.element.srcObject = null; } catch { /* noop */ }
+    }
+    this.element = null;
+    this.sinkNode = null;
+  },
+};
 
 /* --- theme ------------------------------------------------------------ */
 
@@ -538,6 +647,98 @@ async function testMicrophone() {
   }
 }
 
+/** Populate the output picker and say plainly what this browser can do. */
+async function refreshOutputDevices() {
+  if (!el.outputSelect) return;
+
+  const support = audioOutput.detectSupport();
+  const devices = await audioOutput.list();
+  const labelled = devices.filter((d) => d.label);
+  const headphones = labelled.filter((d) => audioOutput.looksLikeHeadphones(d.label));
+
+  const previous = el.outputSelect.value
+    || (() => { try { return localStorage.getItem(OUTPUT_PREF_KEY) || ''; } catch { return ''; } })();
+
+  el.outputSelect.innerHTML = '';
+  const fallback = document.createElement('option');
+  fallback.value = '';
+  fallback.textContent = 'System default';
+  el.outputSelect.appendChild(fallback);
+
+  devices.forEach((device, index) => {
+    if (device.deviceId === 'default' || device.deviceId === 'communications') return;
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label || `Output ${index + 1}`;
+    el.outputSelect.appendChild(option);
+  });
+
+  if (previous && el.outputSelect.querySelector(`option[value="${CSS.escape(previous)}"]`)) {
+    el.outputSelect.value = previous;
+  }
+
+  const unsupported = support === 'unsupported';
+  el.outputSelect.disabled = unsupported;
+
+  if (unsupported) {
+    el.outputStatus.textContent = 'This browser cannot choose an output device.';
+    el.outputStatus.className = 'output-status output-status--warn';
+    el.outputNote.textContent =
+      'Arin will play through whatever your system has selected. Set your headphones '
+      + 'as the default output device in your operating system instead.';
+    return;
+  }
+
+  if (!labelled.length) {
+    el.outputStatus.textContent = 'Device names appear after you allow the microphone once.';
+    el.outputStatus.className = 'output-status';
+    el.outputNote.textContent = 'Press Start Voice Assistant, then come back to pick an output.';
+    return;
+  }
+
+  if (headphones.length) {
+    el.outputStatus.textContent = `🎧 Headphones detected — ${headphones[0].label}`;
+    el.outputStatus.className = 'output-status output-status--good';
+  } else {
+    el.outputStatus.textContent = '🔈 No headphones detected — using a speaker.';
+    el.outputStatus.className = 'output-status output-status--warn';
+  }
+  el.outputNote.textContent =
+    support === 'context'
+      ? "Arin's voice is routed to the device you pick here."
+      : "Arin's voice is routed through a media element to the device you pick here.";
+}
+
+/** Play a short sample so the caller can confirm they hear Arin. */
+async function testVoiceOutput() {
+  const button = $('#test-voice-button');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Playing…';
+  let ctx;
+  try {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') await ctx.resume();
+    const sink = await audioOutput.attach(ctx, el.outputSelect ? el.outputSelect.value : '');
+    const player = new AudioPlayer(ctx, sink);
+
+    const sample = app.config && app.config.hindi_voice_available
+      ? 'नमस्ते, मैं आरिन हूँ। क्या आप मुझे सुन पा रहे हैं?'
+      : 'Hello, this is Arin. Can you hear me clearly?';
+    const body = await apiPost('/api/speech/hindi', { text: sample });
+    player.enqueue(base64ToInt16(body.audio));
+    await new Promise((r) => setTimeout(r, (body.seconds + 0.6) * 1000));
+    setMicHint('If you did not hear that, pick a different output device above.', null);
+  } catch (err) {
+    setMicHint(`Could not play the test: ${err.message}`, 'bad');
+  } finally {
+    audioOutput.detach();
+    if (ctx) ctx.close().catch(() => {});
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 function setMicHint(message, tone) {
   if (!el.micLevelHint) return;
   if (!message) {
@@ -707,13 +908,20 @@ async function triggerEmergencyButton() {
  * ------------------------------------------------------------------ */
 
 class AudioPlayer {
-  constructor(context) {
+  /**
+   * @param {AudioContext} context
+   * @param {MediaStreamAudioDestinationNode|null} sinkNode
+   *   When routing to a chosen output device, audio goes here instead of
+   *   ctx.destination so an <audio> element can carry it to that device.
+   *   Output routing only — the microphone graph is untouched.
+   */
+  constructor(context, sinkNode = null) {
     this.ctx = context;
     this.cursor = 0;
     this.lastEnqueueAt = 0;   // when audio last arrived, for the echo guard
     this.sources = new Set();
     this.gain = context.createGain();
-    this.gain.connect(context.destination);
+    this.gain.connect(sinkNode || context.destination);
   }
 
   enqueue(int16) {
@@ -868,6 +1076,7 @@ async function startVoiceSession() {
     app.mediaStream = await navigator.mediaDevices.getUserMedia({ audio });
     // Labels are only readable after permission is granted at least once.
     refreshMicList();
+    refreshOutputDevices();
   } catch (err) {
     setState('error');
     const name = err && err.name;
@@ -925,7 +1134,12 @@ async function startVoiceSession() {
     app.audioContext = new AudioContextClass();
     if (app.audioContext.state === 'suspended') await app.audioContext.resume();
     app.captureRate = app.audioContext.sampleRate;
-    app.player = new AudioPlayer(app.audioContext);
+    // Output routing is independent of capture: the caller can speak into
+    // the laptop microphone while hearing Arin in a headset.
+    const sinkNode = await audioOutput.attach(
+      app.audioContext, el.outputSelect ? el.outputSelect.value : ''
+    );
+    app.player = new AudioPlayer(app.audioContext, sinkNode);
     // Hindi sessions are voiced by Sarvam through our own server, because
     // AssemblyAI has no Hindi voice. Only engage it when the server actually
     // has a Sarvam key, otherwise fall back to AssemblyAI's romanised speech.
@@ -1246,6 +1460,9 @@ function handleServerEvent(message) {
 
     case 'input.speech.stopped':
       app.userSpeaking = false;
+      // The caller has stopped and the reply has not begun: that gap is
+      // Arin thinking, and saying so beats a silent, apparently dead UI.
+      if (!app.agentTurnActive && isActive()) setState('thinking');
       flushPendingToolResults();
       break;
 
@@ -1480,6 +1697,7 @@ async function teardown() {
   hideToolActivity();
 
   if (app.hindiSpeaker) { app.hindiSpeaker.cancel(); app.hindiSpeaker = null; }
+  audioOutput.detach();
   if (app.player) { app.player.flush(); app.player = null; }
 
   if (app.workletNode) {
@@ -1923,6 +2141,7 @@ const ACTIONS = {
   'toggle-voice': toggleVoiceSession,
   reconnect: () => { clearError(); startVoiceSession(); },
   'test-mic': testMicrophone,
+  'test-voice': testVoiceOutput,
   'clear-transcript': clearTranscript,
   'close-modal': closeModal,
   emergency: triggerEmergencyButton,
@@ -2029,6 +2248,19 @@ async function init() {
         showError('Audio setup changed. Press End, then Start again to apply it.');
       }
     });
+  }
+
+  refreshOutputDevices();
+  if (el.outputSelect) {
+    el.outputSelect.addEventListener('change', () => {
+      try { localStorage.setItem(OUTPUT_PREF_KEY, el.outputSelect.value); } catch { /* ignore */ }
+      if (isActive()) {
+        showError('Output device changed. Press End, then Start again to apply it.');
+      }
+    });
+  }
+  if (navigator.mediaDevices) {
+    navigator.mediaDevices.addEventListener?.('devicechange', refreshOutputDevices);
   }
 
   refreshMicList();

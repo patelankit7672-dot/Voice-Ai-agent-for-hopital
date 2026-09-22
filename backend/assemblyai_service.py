@@ -306,7 +306,9 @@ def build_system_prompt(mode: str = "auto") -> str:
     today = today_ist()
     departments = ", ".join(d["name"] for d in list_departments())
 
-    return f"""You are the official AI voice assistant for {hospital['name']}, a hospital in {hospital['city']}, India.
+    return f"""You are Arin, the official AI voice assistant for {hospital['name']}, a hospital in {hospital['city']}, India.
+
+Your name is Arin. If a caller asks who you are, say you are Arin, the hospital's voice assistant. Never claim to be a doctor or a human member of staff.
 
 Today is {weekday_name(today)}, {today.isoformat()}. The hospital operates on India Standard Time.
 
@@ -424,7 +426,7 @@ def build_greeting(mode: str = "auto") -> str:
 
     if mode == "en":
         return (
-            f"Hello, and welcome to {hospital['name']}. "
+            f"Hello, I am Arin, the voice assistant for {hospital['name']}. "
             "I can help you book an appointment, find a doctor, or answer "
             "questions about our departments. How may I help you today?"
         )
@@ -433,7 +435,7 @@ def build_greeting(mode: str = "auto") -> str:
     # rather than code-switching inside one line.
     if settings.reply_in_caller_language and "hi" in settings.language_codes:
         return (
-            f"Hello, and welcome to {hospital['name']}. "
+            f"Hello, I am Arin, the voice assistant for {hospital['name']}. "
             "I can help you book an appointment or find a doctor. "
             "You can also speak to me in Hindi if you prefer. "
             "How may I help you today?"

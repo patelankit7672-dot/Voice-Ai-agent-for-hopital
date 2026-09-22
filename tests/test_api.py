@@ -499,10 +499,12 @@ def test_frontend_never_names_or_holds_a_credential():
         "varanasi.micDeviceId",
         "varanasi.language",
         "varanasi.audioSetup",
+        "varanasi.audioOutput",
         "THEME_KEY",
         "MIC_PREF_KEY",
         "LANG_PREF_KEY",
         "AUDIO_SETUP_KEY",
+        "OUTPUT_PREF_KEY",
     }
     storage_write = re.compile(
         r"""(?:local|session)Storage\.setItem\(\s*(?:"""
@@ -1124,3 +1126,47 @@ def test_microphone_is_gated_while_the_agent_speaks_on_speakers():
     assert "el.audioSetup.value === 'headphones'" in app_js
     # Echo cancellation follows the setup rather than being hard-coded on.
     assert "echoCancellation: app.speakerMode" in app_js
+
+
+def test_audio_output_manager_handles_all_support_levels():
+    """
+    Phase 4: the page must route Arin's voice to a chosen output device, and
+    must be honest when the browser cannot. Verified in a real browser:
+      context path  -> AudioContext.setSinkId called with the device id
+      element path  -> bridge node + <audio>.setSinkId called
+      neither       -> selector disabled, told to set the OS default
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "AudioContext.prototype.setSinkId" in app_js
+    assert "HTMLMediaElement.prototype.setSinkId" in app_js
+    assert "createMediaStreamDestination()" in app_js, "element fallback bridge"
+    assert "'unsupported'" in app_js
+    assert "cannot choose an output device" in app_js
+
+    # Output routing must not touch capture: the player takes the sink node,
+    # the microphone graph is built separately.
+    assert "constructor(context, sinkNode = null)" in app_js
+    assert "new AudioPlayer(app.audioContext, sinkNode)" in app_js
+
+
+def test_assistant_is_named_arin():
+    """The agent must know its own name and never claim to be a clinician."""
+    from backend.assemblyai_service import build_greeting, build_system_prompt
+
+    prompt = build_system_prompt("en")
+    assert "You are Arin" in prompt
+    assert "Never claim to be a doctor" in prompt
+    assert "Arin" in build_greeting("en")
+
+
+def test_ui_reports_a_thinking_state():
+    """Phase 5: the gap between the caller stopping and Arin replying."""
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "thinking:" in app_js
+    assert "Arin is thinking" in app_js
+    assert "Arin is listening" in app_js
+    assert "Arin is speaking" in app_js
