@@ -31,6 +31,11 @@ const ECHO_GUARD_MS = 350;          // ignore voice activity while the agent is 
 // How long after the agent stops to keep the microphone gated on speakers.
 // Covers the room's reverb tail, which the recogniser would otherwise hear.
 const MIC_GATE_TAIL_MS = 250;
+// Peak sample value (of 32767) above which mic input is treated as the caller
+// speaking rather than echo leaking back from the speakers. Residual echo
+// after browser cancellation sits far below this; speech near a laptop mic is
+// well above it. Roughly 0.09 of full scale.
+const BARGE_IN_THRESHOLD = 3000;
 const TOOL_RESULT_MAX_HOLD_MS = 2500;
 const PLAYBACK_LEAD_SECONDS = 0.06;
 
@@ -1097,24 +1102,40 @@ async function startMicrophoneStream() {
     if (!app.ws || app.ws.readyState !== WebSocket.OPEN) return;
 
     /*
-     * HALF DUPLEX ON SPEAKERS.
+     * ECHO SUPPRESSION WITH BARGE-IN, ON SPEAKERS.
      *
      * Echo cancellation alone is not enough on a laptop: the agent's voice
-     * still leaks into the microphone, and the recogniser then hears the
-     * agent talking over the caller. The symptom is precise — with
-     * headphones the caller is understood, without them they are not,
-     * because only then is there a speaker-to-microphone path.
+     * still leaks into the microphone and the recogniser hears the agent
+     * talking over the caller. The symptom is precise — with headphones the
+     * caller is understood, without them they are not, because only then is
+     * there a speaker-to-microphone path.
      *
-     * So while the agent is audible, send SILENCE rather than the room.
-     * Silence keeps the stream continuous, which turn detection needs; going
-     * quiet entirely would look like a stalled connection. On headphones this
-     * is skipped, so the caller can still interrupt mid-sentence.
+     * But muting outright is worse. The agent's reply can be thirty seconds
+     * of scheduled audio, and a caller who starts talking during it — which
+     * is what people naturally do — is ignored for the whole of it.
+     *
+     * So suppress by LEVEL, not by time. Residual echo that survives the
+     * browser's canceller is quiet; someone speaking near the microphone is
+     * not. Below the threshold we send silence (the stream must stay
+     * continuous or turn detection reads it as a stalled connection); above
+     * it we send the real audio, so the caller can interrupt.
      */
     if (app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)) {
-      const wanted = Math.floor(int16.length / (rate / SAMPLE_RATE));
-      if (!silence || silence.length !== wanted) silence = new Int16Array(wanted);
-      send({ type: 'input.audio', audio: int16ToBase64(silence) });
-      return;
+      let peak = 0;
+      for (let i = 0; i < int16.length; i += 1) {
+        const a = int16[i] < 0 ? -int16[i] : int16[i];
+        if (a > peak) peak = a;
+      }
+      if (peak < BARGE_IN_THRESHOLD) {
+        const wanted = Math.floor(int16.length / (rate / SAMPLE_RATE));
+        if (!silence || silence.length !== wanted) silence = new Int16Array(wanted);
+        send({ type: 'input.audio', audio: int16ToBase64(silence) });
+        return;
+      }
+      // Loud enough to be the caller, not leakage: stop the agent and let
+      // this through, so the interruption is heard from its first word.
+      if (app.player) app.player.flush();
+      if (app.hindiSpeaker) app.hindiSpeaker.cancel();
     }
 
     const outgoing = resampleInt16(int16, rate, SAMPLE_RATE);

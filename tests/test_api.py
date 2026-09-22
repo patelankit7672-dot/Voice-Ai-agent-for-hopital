@@ -1114,6 +1114,12 @@ def test_microphone_is_gated_while_the_agent_speaks_on_speakers():
     )
     assert "app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)" in app_js
     assert "MIC_GATE_TAIL_MS" in app_js
+    # Suppression is by LEVEL, not by time. Muting for the whole reply meant a
+    # caller who spoke during a thirty-second answer was ignored throughout;
+    # measured, quiet leakage (peak 1019) is silenced while speech (25479)
+    # passes and interrupts.
+    assert "BARGE_IN_THRESHOLD" in app_js
+    assert "peak < BARGE_IN_THRESHOLD" in app_js
     # Headphone users keep full duplex so they can still interrupt.
     assert "el.audioSetup.value === 'headphones'" in app_js
     # Echo cancellation follows the setup rather than being hard-coded on.
