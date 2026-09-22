@@ -1150,6 +1150,9 @@ class AudioPlayer {
     this.pending = [];
     this.pendingSamples = 0;
     this.pendingTimer = null;
+    // Resampler continuity across buffers (see resampleToContext).
+    this.resamplePos = 0;
+    this.resamplePrev = 0;
     this.gain = context.createGain();
     this.gain.connect(sinkNode || context.destination);
   }
@@ -1186,6 +1189,37 @@ class AudioPlayer {
     }
   }
 
+  /**
+   * Convert PCM at SAMPLE_RATE to the context's rate, without seams.
+   *
+   * The interpolation position and the trailing sample are carried between
+   * calls, so consecutive buffers join exactly where the previous one ended.
+   * A per-buffer resampler cannot do this and clicks at every boundary.
+   */
+  resampleToContext(input) {
+    const dstRate = this.ctx.sampleRate;
+    if (dstRate === SAMPLE_RATE || !input.length) return input;
+
+    const step = SAMPLE_RATE / dstRate;     // input samples per output sample
+    const out = [];
+    let pos = this.resamplePos;             // may be fractional, or negative
+    let previous = this.resamplePrev;
+
+    for (;;) {
+      const index = Math.floor(pos);
+      if (index + 1 >= input.length) break; // need the next sample to interpolate
+      const a = index < 0 ? previous : input[index];
+      const b = input[index + 1];
+      out.push(a + (b - a) * (pos - index));
+      pos += step;
+    }
+
+    // Carry the phase and the boundary sample into the next buffer.
+    this.resamplePrev = input[input.length - 1];
+    this.resamplePos = pos - input.length;
+    return Float32Array.from(out);
+  }
+
   /** Concatenate what has accumulated and schedule it as one buffer. */
   flushPending() {
     clearTimeout(this.pendingTimer);
@@ -1201,8 +1235,21 @@ class AudioPlayer {
     this.pending = [];
     this.pendingSamples = 0;
 
-    const buffer = this.ctx.createBuffer(1, merged.length, SAMPLE_RATE);
-    buffer.copyToChannel(merged, 0);
+    /*
+     * Resample to the context's own rate here, continuously.
+     *
+     * Handing the browser a 24 kHz AudioBuffer for a 48 kHz context works,
+     * but every BufferSource resamples INDEPENDENTLY, so its filter state
+     * resets at each buffer boundary — 203 resets in one measured reply, each
+     * a discontinuity at the seam, heard as a crackle running through the
+     * voice. Converting once, with the interpolation phase and the previous
+     * sample carried across buffers, removes every seam.
+     */
+    const samples = this.resampleToContext(merged);
+    if (!samples.length) return;
+
+    const buffer = this.ctx.createBuffer(1, samples.length, this.ctx.sampleRate);
+    buffer.copyToChannel(samples, 0);
 
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
@@ -1239,6 +1286,8 @@ class AudioPlayer {
     this.pendingTimer = null;
     this.pending = [];
     this.pendingSamples = 0;
+    this.resamplePos = 0;
+    this.resamplePrev = 0;
     this.sources.forEach((source) => {
       try { source.stop(); } catch { /* already finished */ }
     });

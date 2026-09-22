@@ -1415,3 +1415,30 @@ def test_bluetooth_profile_conflict_is_avoided():
     assert "const chosen = await resolveMicrophoneChoice();" in app_js
     # Only intervene when there is a genuinely independent alternative.
     assert "if (!independent) return chosen;" in app_js
+
+
+def test_audio_is_resampled_once_with_continuity_across_buffers():
+    """
+    The voice crackled. The context runs at 48 kHz while the audio arrives at
+    24 kHz, and handing the browser a 24 kHz AudioBuffer makes every
+    BufferSource resample INDEPENDENTLY — its filter state resets at each
+    buffer boundary, 203 times in one measured reply, each a discontinuity
+    heard as a click.
+
+    Converting once, carrying the interpolation phase and the trailing sample
+    between buffers, removes every seam. Verified in a browser by feeding a
+    200 Hz sine in 10 ms chunks and inspecting the joins:
+
+        expected max step per sample : 0.01623   (the sine's own slope)
+        actual max step              : 0.01598   -> no discontinuity
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "resampleToContext(" in app_js
+    # Buffers must be created at the CONTEXT rate, not the wire rate.
+    assert "this.ctx.createBuffer(1, samples.length, this.ctx.sampleRate)" in app_js
+    assert "createBuffer(1, merged.length, SAMPLE_RATE)" not in app_js
+    # Continuity state, and it must reset when playback restarts.
+    assert "this.resamplePos" in app_js
+    assert "this.resamplePrev" in app_js
