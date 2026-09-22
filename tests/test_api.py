@@ -1228,3 +1228,72 @@ def test_silent_microphone_is_reported_not_ignored():
     # And flags the unusable endpoint in the picker itself.
     assert "no microphone" in app_js
     assert "hands[- ]?free" in app_js
+
+
+# ---------------------------------------------------------------- latency
+
+
+def test_outbound_http_uses_a_pooled_client():
+    """
+    Both integrations opened a new AsyncClient per call, paying for a fresh
+    DNS lookup, TCP handshake and TLS negotiation to another continent every
+    time. The token mint sits directly on the caller's connect path.
+    """
+    from backend import assemblyai_service, sarvam_service
+
+    for module in (assemblyai_service, sarvam_service):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "httpx.AsyncClient(" not in source, f"{module.__name__} still builds its own client"
+        assert "get_client()" in source
+
+
+def test_pooled_client_is_reused_across_calls():
+    from backend.http_client import get_client
+
+    assert get_client() is get_client()
+
+
+def test_connection_is_guarded_against_duplicate_sessions():
+    """
+    isActive() only turns true once the socket opens, so rapid clicks during
+    the connect window each started their own session — several microphone
+    streams, several sockets, several tokens burned. Verified in a browser:
+    three clicks produced exactly one WebSocket and one session.ready.
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "if (isActive() || app.connecting) return;" in app_js
+    assert "el.startButton.disabled = true;" in app_js
+    # And a ceiling so the UI can never sit on "Connecting…" forever.
+    assert "CONNECT_TIMEOUT_MS" in app_js
+    assert "taking too long" in app_js
+
+
+def test_token_request_overlaps_microphone_permission():
+    """
+    The token does not depend on the microphone, so it must not queue behind
+    it. Measured in a browser: the token stage fell from 1012 ms to 261 ms
+    and total connect from 2300 ms to 1633 ms.
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    # Scope to startVoiceSession: testMicrophone() also calls getUserMedia,
+    # and comparing against that one proves nothing about the session path.
+    start = app_js.index("async function startVoiceSession()")
+    body = app_js[start:app_js.index("\nfunction send(", start)]
+
+    token_start = body.index("tokenPromise = apiGet(")
+    mic_await = body.index("await navigator.mediaDevices.getUserMedia")
+    assert token_start < mic_await, "the token request must be in flight before the mic await"
+    assert "credentials = await tokenPromise;" in body
+
+
+def test_connection_stages_are_measured():
+    """Latency must be attributable to a stage, not guessed at."""
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    for mark in ("microphone", "token", "audioGraph", "socketOpen", "sessionReady"):
+        assert f"timings.mark('{mark}')" in app_js, mark

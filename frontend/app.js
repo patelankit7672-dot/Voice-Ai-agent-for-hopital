@@ -34,6 +34,9 @@ const MIC_GATE_TAIL_MS = 250;
 // How long a session may receive pure digital silence before the caller is
 // told their microphone is producing nothing.
 const SILENCE_WATCHDOG_MS = 5000;
+// Hard ceiling on bringing a session up, so the UI can never sit on
+// "Connecting…" forever.
+const CONNECT_TIMEOUT_MS = 15000;
 const TOOL_RESULT_MAX_HOLD_MS = 2500;
 const PLAYBACK_LEAD_SECONDS = 0.06;
 
@@ -655,6 +658,43 @@ async function testMicrophone() {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Connection timing
+ *
+ * Every stage of bringing a session up is marked, so a slow connection can
+ * be attributed to a stage instead of guessed at. Kept in production: the
+ * cost is a few timestamps, and the alternative is debugging latency blind.
+ * ------------------------------------------------------------------ */
+
+const timings = {
+  marks: {},
+  t0: 0,
+
+  start() {
+    this.marks = {};
+    this.t0 = performance.now();
+  },
+
+  mark(name) {
+    if (!this.t0) return;
+    this.marks[name] = Math.round(performance.now() - this.t0);
+  },
+
+  report(label) {
+    if (!this.t0) return null;
+    const entries = Object.entries(this.marks);
+    let previous = 0;
+    const steps = entries.map(([name, at]) => {
+      const step = at - previous;
+      previous = at;
+      return `${name}=${step}ms`;
+    });
+    const total = entries.length ? entries[entries.length - 1][1] : 0;
+    console.log(`[TIMING] ${label}: ${steps.join('  ')}  TOTAL=${total}ms`);
+    return { ...this.marks, total };
+  },
+};
+
 /**
  * Watch for a microphone that is delivering literal digital silence.
  *
@@ -1090,6 +1130,8 @@ const app = {
   micTest: null,
   streamSink: null,
   silenceWatchdog: null,
+  connecting: false,
+  connectTimeout: null,
   sawRealAudio: false,
   hindiSpeaker: null,
   speakerMode: true,   // half-duplex unless headphones are selected
@@ -1109,11 +1151,37 @@ function setState(next) {
 /* --- connect -------------------------------------------------------- */
 
 async function startVoiceSession() {
-  if (isActive()) return;
+  /*
+   * ONE SESSION, ALWAYS.
+   *
+   * isActive() only becomes true once the socket is open, so rapid clicks
+   * during the connect window each began their own session: several
+   * microphone streams, several sockets, several tokens burned. The
+   * connecting flag closes that window, and the button is disabled for the
+   * duration so the UI matches the rule.
+   */
+  if (isActive() || app.connecting) return;
+  app.connecting = true;
+  el.startButton.disabled = true;
+  el.micButton.disabled = true;
 
+  timings.start();
   clearError();
   setState('connecting');
   app.intentionalClose = false;
+
+  // Never leave the UI stuck on "Connecting…".
+  clearTimeout(app.connectTimeout);
+  app.connectTimeout = setTimeout(() => {
+    if (isActive()) return;
+    showError(
+      'Voice connection is taking too long. Please check your network and press Reconnect.'
+    );
+    setState('error');
+    teardown();
+  }, CONNECT_TIMEOUT_MS);
+
+  let tokenPromise = null;
 
   /*
    * Step 1 — microphone permission FIRST.
@@ -1140,7 +1208,26 @@ async function startVoiceSession() {
     // which is often the wrong microphone on laptops with a headset paired.
     const chosen = el.micSelect && el.micSelect.value;
     if (chosen) audio.deviceId = { exact: chosen };
+
+    /*
+     * The token request does NOT depend on the microphone, so start it now
+     * and await it later. Previously these ran back to back: the browser
+     * finished the permission prompt and device open, and only then did the
+     * round trip to our server and on to AssemblyAI begin. Overlapping them
+     * removes the whole token latency from the critical path, because it
+     * completes while the audio device is still opening.
+     *
+     * The promise is created before the await below, and the rejection is
+     * absorbed here so a token failure cannot surface as an unhandled
+     * rejection while the microphone prompt is still open; the real error is
+     * handled where the value is consumed.
+     */
+    const lang = (el.langSelect && el.langSelect.value) || 'auto';
+    tokenPromise = apiGet(`/api/voice-token?lang=${encodeURIComponent(lang)}`);
+    tokenPromise.catch(() => {});
+
     app.mediaStream = await navigator.mediaDevices.getUserMedia({ audio });
+    timings.mark('microphone');
     // Labels are only readable after permission is granted at least once.
     refreshMicList();
     refreshOutputDevices();
@@ -1163,14 +1250,12 @@ async function startVoiceSession() {
     return;
   }
 
-  // Step 2 — now that the microphone is ours, ask OUR server for a
-  // short-lived token. The permanent AssemblyAI key never leaves the server.
+  // Step 2 — collect the token that has been in flight since step 1.
+  // The permanent AssemblyAI key never leaves the server.
   let credentials;
   try {
-    // The chosen language is decided per session: it changes the system
-    // prompt, the greeting AND which languages the recogniser considers.
-    const lang = (el.langSelect && el.langSelect.value) || 'auto';
-    credentials = await apiGet(`/api/voice-token?lang=${encodeURIComponent(lang)}`);
+    credentials = await tokenPromise;
+    timings.mark('token');
   } catch (err) {
     setState('error');
     showError(
@@ -1207,6 +1292,7 @@ async function startVoiceSession() {
       app.audioContext, el.outputSelect ? el.outputSelect.value : ''
     );
     app.player = new AudioPlayer(app.audioContext, sinkNode);
+    timings.mark('audioGraph');
     // Hindi sessions are voiced by Sarvam through our own server, because
     // AssemblyAI has no Hindi voice. Only engage it when the server actually
     // has a Sarvam key, otherwise fall back to AssemblyAI's romanised speech.
@@ -1243,6 +1329,7 @@ async function startVoiceSession() {
   credentials.token = null;
 
   socket.onopen = () => {
+    timings.mark('socketOpen');
     console.log('[DIAG] ws.onopen — sending session.update');
     // The docs require session.update as the first message, before session.ready.
     send({ type: 'session.update', session: sessionConfig });
@@ -1555,6 +1642,16 @@ function handleServerEvent(message) {
   switch (message.type) {
 
     case 'session.ready': {
+      timings.mark('sessionReady');
+      timings.report('connect');
+      clearTimeout(app.connectTimeout);
+      app.connectTimeout = null;
+      // The connect attempt succeeded, so release the lock here as well as in
+      // teardown — teardown does not run on the happy path, and leaving the
+      // button disabled would strand the caller with no way to end the call.
+      app.connecting = false;
+      if (el.startButton) el.startButton.disabled = false;
+      if (el.micButton) el.micButton.disabled = false;
       startSilenceWatchdog();
       app.sessionId = message.session_id || null;
       setState('connected');
@@ -1633,6 +1730,7 @@ function handleServerEvent(message) {
     }
 
     case 'reply.started':
+      timings.mark('replyStarted');
       app.agentTurnActive = true;
       setState('speaking');
       break;
@@ -1821,7 +1919,11 @@ function endVoiceSession() {
 async function teardown() {
   if (app.pendingTimer) { clearTimeout(app.pendingTimer); app.pendingTimer = null; }
   if (app.analyserTimer) { clearInterval(app.analyserTimer); app.analyserTimer = null; }
+  if (app.connectTimeout) { clearTimeout(app.connectTimeout); app.connectTimeout = null; }
   stopSilenceWatchdog();
+  app.connecting = false;
+  if (el.startButton) el.startButton.disabled = false;
+  if (el.micButton) el.micButton.disabled = false;
   if (app.streamSink) {
     try { app.streamSink.pause(); app.streamSink.srcObject = null; } catch { /* noop */ }
     app.streamSink = null;

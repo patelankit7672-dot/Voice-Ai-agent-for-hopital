@@ -26,6 +26,7 @@ from . import admin_service as admin
 from . import appointment_service as appointments
 from . import emergency_service as emergency
 from . import hospital_service as hospital
+from .http_client import close_client, get_client
 from .assemblyai_service import (
     VoiceTokenError,
     build_session_config,
@@ -96,7 +97,11 @@ async def lifespan(_: FastAPI):
     notice = spoken_language_notice()
     if notice:
         logger.info("Language note: %s", notice)
+    # Open the pooled client up front so the first caller does not pay for
+    # the handshake on the connect path.
+    get_client()
     yield
+    await close_client()
     logger.info("Shutting down.")
 
 

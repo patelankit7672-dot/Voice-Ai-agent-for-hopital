@@ -40,6 +40,7 @@ from typing import Any, Dict
 import httpx
 
 from .config import AUDIO_SAMPLE_RATE, settings
+from .http_client import get_client
 
 logger = logging.getLogger("varanasi.sarvam")
 
@@ -117,15 +118,17 @@ async def synthesize_hindi(text: str) -> Dict[str, Any]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                SARVAM_TTS_URL,
-                json=payload,
-                headers={
-                    "api-subscription-key": settings.sarvam_api_key,
-                    "Content-Type": "application/json",
-                },
-            )
+        # Pooled: Hindi replies are synthesised one sentence at a time, so a
+        # warm connection is reused many times within a single reply.
+        response = await get_client().post(
+            SARVAM_TTS_URL,
+            json=payload,
+            headers={
+                "api-subscription-key": settings.sarvam_api_key,
+                "Content-Type": "application/json",
+            },
+            timeout=30.0,
+        )
     except httpx.TimeoutException:
         logger.warning("Sarvam TTS timed out")
         raise SarvamError(
