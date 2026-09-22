@@ -27,7 +27,10 @@
 
 const SAMPLE_RATE = 24000;          // Voice Agent API requires 24 kHz PCM16
 const CHUNK_SECONDS = 0.05;         // ~50 ms per chunk, as the docs recommend
-const ECHO_GUARD_MS = 350;          // ignore voice activity just after reply.started
+const ECHO_GUARD_MS = 350;          // ignore voice activity while the agent is audible
+// How long after the agent stops to keep the microphone gated on speakers.
+// Covers the room's reverb tail, which the recogniser would otherwise hear.
+const MIC_GATE_TAIL_MS = 250;
 const TOOL_RESULT_MAX_HOLD_MS = 2500;
 const PLAYBACK_LEAD_SECONDS = 0.06;
 
@@ -61,6 +64,8 @@ const el = {
   errorBox:         $('#error-box'),
   langNote:         $('#lang-note'),
   micSelect:        $('#mic-select'),
+  audioSetup:       $('#audio-setup'),
+  audioSetupNote:   $('#audio-setup-note'),
   langSelect:       $('#lang-select'),
   micLevelHint:     $('#mic-level-hint'),
   emergencyBanner:  $('#emergency-banner'),
@@ -247,11 +252,11 @@ class HindiSpeaker {
  *   2. audio arrived moments ago (the tail of a sentence)
  *   3. Hindi sentences are still being synthesised over the network
  */
-function agentIsAudible() {
+function agentIsAudible(tailMs = ECHO_GUARD_MS) {
   if (app.hindiSpeaker && app.hindiSpeaker.pending > 0) return true;
   if (!app.player) return false;
   if (app.player.isPlaying) return true;
-  return Date.now() - app.player.lastEnqueueAt < ECHO_GUARD_MS;
+  return Date.now() - app.player.lastEnqueueAt < tailMs;
 }
 
 /* --- theme ------------------------------------------------------------ */
@@ -290,6 +295,7 @@ function initTheme() {
 
 const MIC_PREF_KEY = 'varanasi.micDeviceId';
 const LANG_PREF_KEY = 'varanasi.language';
+const AUDIO_SETUP_KEY = 'varanasi.audioSetup';
 
 /**
  * Fill the picker with the real input devices. Labels are only exposed once
@@ -806,6 +812,7 @@ const app = {
   micTest: null,
   streamSink: null,
   hindiSpeaker: null,
+  speakerMode: true,   // half-duplex unless headphones are selected
   config: null,
   intentionalClose: false,
 };
@@ -837,7 +844,18 @@ async function startVoiceSession() {
    * the hardware first; only mint a token once we know we can actually use it.
    */
   try {
-    const audio = { echoCancellation: true, noiseSuppression: false, autoGainControl: true };
+    /*
+     * On speakers the agent's own voice reaches the microphone, so echo
+     * cancellation is essential. On headphones there is no echo path, and
+     * leaving AEC on only costs sensitivity — it behaves as a noise gate and
+     * can duck a softly spoken caller.
+     */
+    app.speakerMode = !(el.audioSetup && el.audioSetup.value === 'headphones');
+    const audio = {
+      echoCancellation: app.speakerMode,
+      noiseSuppression: false,
+      autoGainControl: true,
+    };
     // An explicitly chosen device wins over the operating system default,
     // which is often the wrong microphone on laptops with a headset paired.
     const chosen = el.micSelect && el.micSelect.value;
@@ -1072,8 +1090,33 @@ async function startMicrophoneStream() {
   };
 
   let loggedFirstChunk = false;
+  // Reused so a gated chunk costs no allocation.
+  let silence = null;
+
   const pushChunk = (int16) => {
     if (!app.ws || app.ws.readyState !== WebSocket.OPEN) return;
+
+    /*
+     * HALF DUPLEX ON SPEAKERS.
+     *
+     * Echo cancellation alone is not enough on a laptop: the agent's voice
+     * still leaks into the microphone, and the recogniser then hears the
+     * agent talking over the caller. The symptom is precise — with
+     * headphones the caller is understood, without them they are not,
+     * because only then is there a speaker-to-microphone path.
+     *
+     * So while the agent is audible, send SILENCE rather than the room.
+     * Silence keeps the stream continuous, which turn detection needs; going
+     * quiet entirely would look like a stalled connection. On headphones this
+     * is skipped, so the caller can still interrupt mid-sentence.
+     */
+    if (app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)) {
+      const wanted = Math.floor(int16.length / (rate / SAMPLE_RATE));
+      if (!silence || silence.length !== wanted) silence = new Int16Array(wanted);
+      send({ type: 'input.audio', audio: int16ToBase64(silence) });
+      return;
+    }
+
     const outgoing = resampleInt16(int16, rate, SAMPLE_RATE);
     if (!loggedFirstChunk) {
       loggedFirstChunk = true;
@@ -1940,6 +1983,29 @@ async function init() {
       try { localStorage.setItem(LANG_PREF_KEY, el.langSelect.value); } catch { /* ignore */ }
       if (isActive()) {
         showError('Language changed. Press End, then Start again to apply it.');
+      }
+    });
+  }
+
+  if (el.audioSetup) {
+    try {
+      const saved = localStorage.getItem(AUDIO_SETUP_KEY);
+      if (saved) el.audioSetup.value = saved;
+    } catch { /* ignore */ }
+
+    const describeSetup = () => {
+      const headphones = el.audioSetup.value === 'headphones';
+      el.audioSetupNote.textContent = headphones
+        ? 'Full duplex — you can interrupt the assistant mid-sentence.'
+        : 'The microphone pauses while the assistant speaks, so it does not hear itself.';
+    };
+    describeSetup();
+
+    el.audioSetup.addEventListener('change', () => {
+      try { localStorage.setItem(AUDIO_SETUP_KEY, el.audioSetup.value); } catch { /* ignore */ }
+      describeSetup();
+      if (isActive()) {
+        showError('Audio setup changed. Press End, then Start again to apply it.');
       }
     });
   }

@@ -498,9 +498,11 @@ def test_frontend_never_names_or_holds_a_credential():
         "varanasi.theme",
         "varanasi.micDeviceId",
         "varanasi.language",
+        "varanasi.audioSetup",
         "THEME_KEY",
         "MIC_PREF_KEY",
         "LANG_PREF_KEY",
+        "AUDIO_SETUP_KEY",
     }
     storage_write = re.compile(
         r"""(?:local|session)Storage\.setItem\(\s*(?:"""
@@ -1028,7 +1030,7 @@ def test_echo_guard_is_anchored_to_audible_audio_not_the_turn_start():
     app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
         encoding="utf-8"
     )
-    assert "function agentIsAudible()" in app_js
+    assert "function agentIsAudible(" in app_js
     assert "!agentIsAudible()" in app_js, "the VAD flush must consult the guard"
     # The old anchor must not come back as executable code.
     assert "Date.now() - app.replyStartedAt" not in app_js
@@ -1094,3 +1096,25 @@ def test_vercel_entrypoint_exports_the_real_app():
     from backend.main import app as real_app
 
     assert serverless_app is real_app
+
+
+def test_microphone_is_gated_while_the_agent_speaks_on_speakers():
+    """
+    Regression: the microphone streamed continuously, so on laptop speakers
+    the agent's own voice went back into the recogniser and the caller was
+    not understood. The giveaway was that headphones worked and speakers did
+    not — headphones are the only case with no speaker-to-microphone path.
+
+    While the agent is audible the client must send silence, not the room.
+    Silence keeps the stream continuous for turn detection; sending nothing
+    would look like a stalled connection.
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)" in app_js
+    assert "MIC_GATE_TAIL_MS" in app_js
+    # Headphone users keep full duplex so they can still interrupt.
+    assert "el.audioSetup.value === 'headphones'" in app_js
+    # Echo cancellation follows the setup rather than being hard-coded on.
+    assert "echoCancellation: app.speakerMode" in app_js
