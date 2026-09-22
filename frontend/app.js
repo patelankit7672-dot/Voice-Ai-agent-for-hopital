@@ -31,11 +31,6 @@ const ECHO_GUARD_MS = 350;          // ignore voice activity while the agent is 
 // How long after the agent stops to keep the microphone gated on speakers.
 // Covers the room's reverb tail, which the recogniser would otherwise hear.
 const MIC_GATE_TAIL_MS = 250;
-// Peak sample value (of 32767) above which mic input is treated as the caller
-// speaking rather than echo leaking back from the speakers. Residual echo
-// after browser cancellation sits far below this; speech near a laptop mic is
-// well above it. Roughly 0.09 of full scale.
-const BARGE_IN_THRESHOLD = 3000;
 const TOOL_RESULT_MAX_HOLD_MS = 2500;
 const PLAYBACK_LEAD_SECONDS = 0.06;
 
@@ -1312,6 +1307,47 @@ async function startMicrophoneStream() {
   // Reused so a gated chunk costs no allocation.
   let silence = null;
 
+  /*
+   * SOFTWARE AUTOMATIC GAIN.
+   *
+   * Some laptop microphone arrays deliver a signal far below what speech
+   * recognition expects. Measured on one HP OMEN array, the loudest spoken
+   * word peaked at 589 of 32767 — about -35 dBFS, roughly seventeen times
+   * quieter than normal speech at 0.1 to 0.5 of full scale. The browser's own
+   * autoGainControl did not lift it. Recognition then fails silently: audio
+   * arrives, but voice activity detection never considers it speech.
+   *
+   * So measure what this microphone actually produces and scale it up. The
+   * peak decays slowly, so gain follows the caller's voice rather than
+   * pumping on every syllable, and it is floored at 1 so a healthy
+   * microphone is left completely alone.
+   */
+  const AGC_TARGET_PEAK = 8192;      // 0.25 of full scale
+  const AGC_MAX_GAIN = 24;
+  const AGC_DECAY = 0.97;
+  let agcPeak = 0;
+  let noiseFloor = 300;
+  let lastGainLogged = 0;
+
+  const measurePeak = (buf) => {
+    let peak = 0;
+    for (let i = 0; i < buf.length; i += 1) {
+      const a = buf[i] < 0 ? -buf[i] : buf[i];
+      if (a > peak) peak = a;
+    }
+    return peak;
+  };
+
+  const amplify = (buf, gain) => {
+    if (gain <= 1.01) return buf;
+    const out = new Int16Array(buf.length);
+    for (let i = 0; i < buf.length; i += 1) {
+      const v = buf[i] * gain;
+      out[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+    }
+    return out;
+  };
+
   const pushChunk = (int16) => {
     if (!app.ws || app.ws.readyState !== WebSocket.OPEN) return;
 
@@ -1334,13 +1370,28 @@ async function startMicrophoneStream() {
      * continuous or turn detection reads it as a stalled connection); above
      * it we send the real audio, so the caller can interrupt.
      */
+    const peak = measurePeak(int16);
+
+    // Follow the loudest recent sound, and separately track how quiet this
+    // microphone gets, so both gain and the gate adapt to the hardware.
+    agcPeak = Math.max(peak, agcPeak * AGC_DECAY);
+    if (peak < noiseFloor) noiseFloor = noiseFloor * 0.9 + peak * 0.1;
+    else noiseFloor = noiseFloor * 0.999 + peak * 0.001;
+
+    const gain = Math.min(
+      AGC_MAX_GAIN, Math.max(1, AGC_TARGET_PEAK / Math.max(agcPeak, 1))
+    );
+
     if (app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)) {
-      let peak = 0;
-      for (let i = 0; i < int16.length; i += 1) {
-        const a = int16[i] < 0 ? -int16[i] : int16[i];
-        if (a > peak) peak = a;
-      }
-      if (peak < BARGE_IN_THRESHOLD) {
+      /*
+       * The barge-in threshold must be RELATIVE to this microphone, not a
+       * fixed number. A fixed 3000 sat five times above the loudest word a
+       * quiet array produced, so on that hardware the caller was silenced
+       * every time Arin spoke. Six times the noise floor separates speech
+       * from room tone on both loud and quiet microphones.
+       */
+      const bargeIn = Math.max(noiseFloor * 6, 120);
+      if (peak < bargeIn) {
         const wanted = Math.floor(int16.length / (rate / SAMPLE_RATE));
         if (!silence || silence.length !== wanted) silence = new Int16Array(wanted);
         send({ type: 'input.audio', audio: int16ToBase64(silence) });
@@ -1352,13 +1403,23 @@ async function startMicrophoneStream() {
       if (app.hindiSpeaker) app.hindiSpeaker.cancel();
     }
 
-    const outgoing = resampleInt16(int16, rate, SAMPLE_RATE);
+    // Amplify before resampling so the interpolation works on the louder
+    // signal, then resample to the 24 kHz the API expects.
+    const outgoing = resampleInt16(amplify(int16, gain), rate, SAMPLE_RATE);
+
     if (!loggedFirstChunk) {
       loggedFirstChunk = true;
       console.log(
         '[DIAG] first input.audio chunk — captured samples:', int16.length,
-        '| sent samples:', outgoing.length,
-        '| bytes:', outgoing.byteLength
+        '| sent samples:', outgoing.length, '| bytes:', outgoing.byteLength
+      );
+    }
+    // Report gain occasionally: a persistently high figure means the
+    // microphone is very quiet, which is worth knowing.
+    if (gain > 1.5 && Date.now() - lastGainLogged > 3000) {
+      lastGainLogged = Date.now();
+      console.log(
+        `[DIAG] mic gain x${gain.toFixed(1)} (raw peak ${peak}, noise floor ${Math.round(noiseFloor)})`
       );
     }
     send({ type: 'input.audio', audio: int16ToBase64(outgoing) });

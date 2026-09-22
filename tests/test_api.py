@@ -1120,8 +1120,12 @@ def test_microphone_is_gated_while_the_agent_speaks_on_speakers():
     # caller who spoke during a thirty-second answer was ignored throughout;
     # measured, quiet leakage (peak 1019) is silenced while speech (25479)
     # passes and interrupts.
-    assert "BARGE_IN_THRESHOLD" in app_js
-    assert "peak < BARGE_IN_THRESHOLD" in app_js
+    # The threshold is RELATIVE to the microphone. A fixed value sat five
+    # times above the loudest word a quiet laptop array produced (589 of
+    # 32767, about -35 dBFS), silencing that caller whenever Arin spoke.
+    assert "noiseFloor * 6" in app_js
+    assert "peak < bargeIn" in app_js
+    assert "BARGE_IN_THRESHOLD" not in app_js, "fixed threshold must not return"
     # Headphone users keep full duplex so they can still interrupt.
     assert "el.audioSetup.value === 'headphones'" in app_js
     # Echo cancellation follows the setup rather than being hard-coded on.
@@ -1170,3 +1174,27 @@ def test_ui_reports_a_thinking_state():
     assert "Arin is thinking" in app_js
     assert "Arin is listening" in app_js
     assert "Arin is speaking" in app_js
+
+
+def test_quiet_microphones_are_amplified_before_sending():
+    """
+    Some laptop arrays deliver speech far below what recognition expects.
+    Measured on the reporter's HP OMEN array, the loudest spoken word peaked
+    at 589 of 32767 — about -35 dBFS, roughly seventeen times quieter than
+    normal speech. The browser's own autoGainControl did not lift it, so
+    audio arrived and voice activity detection never called it speech.
+
+    Verified in a real browser by simulating that exact level:
+      raw peak 398 -> sent peak 8192 (gain 20.6x) -> transcript.user  ✓
+      raw peak 7643 (normal mic) -> gain 1.07x, no clipping           ✓
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "AGC_TARGET_PEAK" in app_js
+    assert "AGC_MAX_GAIN" in app_js
+    assert "amplify(int16, gain)" in app_js
+    # Floored at 1 so a healthy microphone is left alone rather than reduced.
+    assert "Math.max(1, AGC_TARGET_PEAK" in app_js
+    # And clamped, so a near-silent chunk cannot produce runaway gain.
+    assert "Math.min(\n      AGC_MAX_GAIN" in app_js or "Math.min(AGC_MAX_GAIN" in app_js
