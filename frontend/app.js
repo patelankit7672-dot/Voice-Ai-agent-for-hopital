@@ -722,12 +722,50 @@ function startSilenceWatchdog() {
     const currentLabel = (current && current.label) || 'the selected microphone';
 
     const alternatives = inputs.filter((d) => d.deviceId !== (el.micSelect && el.micSelect.value));
-    const handsFree = alternatives.find((d) => /hands[- ]?free|headset/i.test(d.label || ''));
-    const builtIn = alternatives.find((d) => /array|internal|built[- ]?in|realtek|cam/i.test(d.label || ''));
-    const suggestion = handsFree || builtIn || alternatives[0];
+    // An A2DP endpoint ("Headphones (X)") has no microphone at all, so it can
+    // never be the answer. A built-in array is preferred over a hands-free
+    // profile, because hands-free drags playback quality down with it.
+    const capable = alternatives.filter(
+      (d) => !(/headphone/i.test(d.label || '') && !/hands[- ]?free|headset/i.test(d.label || ''))
+    );
+    const builtIn = capable.find((d) => /array|internal|built[- ]?in|realtek|cam/i.test(d.label || ''));
+    const handsFree = capable.find((d) => /hands[- ]?free/i.test(d.label || ''));
+    const suggestion = builtIn || handsFree || capable[0];
 
-    let message =
-      `No sound at all is reaching the browser from ${currentLabel}. `;
+    /*
+     * Switch away from a dead microphone automatically, once.
+     *
+     * Telling the caller to pick a different device only helps if they read
+     * the message and know which one to choose. The page already knows: a
+     * Bluetooth A2DP endpoint can never capture, so prefer anything else,
+     * and prefer a built-in array over a hands-free profile because
+     * hands-free drags playback quality down with it.
+     */
+    if (!app.autoSwitchTried && suggestion) {
+      app.autoSwitchTried = true;
+      const label = suggestion.label || 'another microphone';
+      showError(
+        `No sound was reaching the browser from ${currentLabel}, so Arin is `
+        + `switching to "${label}" and reconnecting.`
+      );
+      setMicHint(`Switched to ${label}.`, null);
+      if (el.micSelect) {
+        el.micSelect.value = suggestion.deviceId;
+        try { localStorage.setItem(MIC_PREF_KEY, suggestion.deviceId); } catch { /* ignore */ }
+      }
+      app.intentionalClose = true;
+      app.autoSwitching = true;
+      await teardown();
+      // teardown() releases resources but leaves app.state as it was, and
+      // isActive() treats any state but idle/error as live — so without this
+      // the restart below would early-return and the switch would silently
+      // do nothing.
+      setState('idle');
+      setTimeout(() => { app.autoSwitching = false; startVoiceSession(); }, 400);
+      return;
+    }
+
+    let message = `No sound at all is reaching the browser from ${currentLabel}. `;
 
     if (/bluetooth|headphone/i.test(currentLabel)) {
       message +=
@@ -735,13 +773,14 @@ function startSilenceWatchdog() {
         + 'time, so a headset used for listening often has no working microphone. ';
     }
     if (suggestion && suggestion.label) {
-      message += `Try selecting "${suggestion.label}" as the microphone above, then press Reconnect.`;
-    } else {
-      message += 'Check that the microphone is not muted in Windows sound settings.';
+      message += `Selecting "${suggestion.label}" did not help either. `;
     }
+    message +=
+      'Check Windows Settings → System → Sound → Input: test the microphone '
+      + 'there, make sure it is not muted, and check the mic-mute key on your keyboard.';
 
     showError(message);
-    setMicHint('No audio from this microphone — pick a different one above.', 'bad');
+    setMicHint('No audio from any microphone — this is a Windows or hardware issue.', 'bad');
   }, SILENCE_WATCHDOG_MS);
 }
 
@@ -1131,6 +1170,8 @@ const app = {
   streamSink: null,
   silenceWatchdog: null,
   connecting: false,
+  autoSwitchTried: false,
+  autoSwitching: false,
   connectTimeout: null,
   sawRealAudio: false,
   hindiSpeaker: null,
@@ -1167,6 +1208,7 @@ async function startVoiceSession() {
 
   timings.start();
   clearError();
+  if (!app.autoSwitching) app.autoSwitchTried = false;
   setState('connecting');
   app.intentionalClose = false;
 

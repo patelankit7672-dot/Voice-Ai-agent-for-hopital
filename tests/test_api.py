@@ -1297,3 +1297,30 @@ def test_connection_stages_are_measured():
     )
     for mark in ("microphone", "token", "audioGraph", "socketOpen", "sessionReady"):
         assert f"timings.mark('{mark}')" in app_js, mark
+
+
+def test_a_silent_microphone_is_switched_automatically():
+    """
+    Telling the caller to pick a different device only helps if they read the
+    message and know which to choose. The page already knows: a Bluetooth
+    A2DP endpoint ("Headphones (X)") has no microphone at all, so it can
+    never be the answer, and a built-in array is preferred over a hands-free
+    profile because hands-free drags playback quality down with it.
+
+    Verified in a browser with the reporter's real device list, where the
+    A2DP endpoint yields silence and the array yields tone:
+      opened ['bt-a2dp', 'omen'], picker moved to the array, sawRealAudio true.
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "autoSwitchTried" in app_js
+    assert "switching to" in app_js
+    # An A2DP endpoint must never be chosen as the replacement.
+    assert "const capable = alternatives.filter(" in app_js
+    # teardown() leaves app.state alone and isActive() treats anything but
+    # idle/error as live, so the restart needs an explicit reset or it
+    # silently early-returns.
+    assert "setState('idle');" in app_js
+    # One automatic attempt only, then hand over to the caller.
+    assert "if (!app.autoSwitchTried && suggestion)" in app_js
