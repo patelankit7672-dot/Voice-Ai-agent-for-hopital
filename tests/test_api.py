@@ -1124,7 +1124,10 @@ def test_microphone_is_gated_while_the_agent_speaks_on_speakers():
     # times above the loudest word a quiet laptop array produced (589 of
     # 32767, about -35 dBFS), silencing that caller whenever Arin spoke.
     assert "noiseFloor * 6" in app_js
-    assert "peak < bargeIn" in app_js
+    # Suppression is decided by a sustained run of loud chunks, not one
+    # sample — see test_barge_in_requires_sustained_speech_not_a_single_blip.
+    assert "peak >= bargeIn" in app_js
+    assert "loudChunks" in app_js
     assert "BARGE_IN_THRESHOLD" not in app_js, "fixed threshold must not return"
     # Headphone users keep full duplex so they can still interrupt.
     assert "el.audioSetup.value === 'headphones'" in app_js
@@ -1354,3 +1357,30 @@ def test_playback_continues_seamlessly_instead_of_inserting_gaps():
 
     # A partial buffer must still be flushed, or a sentence loses its tail.
     assert "COALESCE_MAX_WAIT_MS" in app_js
+
+
+def test_barge_in_requires_sustained_speech_not_a_single_blip():
+    """
+    Hindi went silent mid-reply while English was fine.
+
+    Barge-in used a threshold of max(noiseFloor * 6, 120). On a quiet array
+    the noise floor tends toward zero, so the floor of 120 — about 0.004 of
+    full scale — was cleared by a keyboard tap or a breath. Barge-in also
+    calls hindiSpeaker.cancel(), which bumps the generation counter and drops
+    every sentence still being synthesised. English recovered because
+    AssemblyAI keeps streaming; Hindi had nothing left to play.
+
+    Verified in a browser during a Hindi reply:
+      three 60 ms blips  -> 4 sentences still spoken, generation stayed 0
+      1.2 s of sound     -> generation 0 -> 1, playback stopped (barge-in)
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "BARGE_IN_FLOOR" in app_js
+    assert "BARGE_IN_CHUNKS" in app_js
+    assert "loudChunks < BARGE_IN_CHUNKS" in app_js
+    # The old degenerate floor must not come back.
+    assert "Math.max(noiseFloor * 6, 120)" not in app_js
+    # The run must reset between turns rather than accumulating.
+    assert "if (!agentIsAudible(MIC_GATE_TAIL_MS)) loudChunks = 0;" in app_js

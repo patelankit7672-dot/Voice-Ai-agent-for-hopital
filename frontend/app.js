@@ -31,6 +31,13 @@ const ECHO_GUARD_MS = 350;          // ignore voice activity while the agent is 
 // How long after the agent stops to keep the microphone gated on speakers.
 // Covers the room's reverb tail, which the recogniser would otherwise hear.
 const MIC_GATE_TAIL_MS = 250;
+// Absolute floor for treating microphone input as the caller rather than
+// leakage. A quiet array's noise floor tends toward zero, so a purely
+// relative threshold degenerates to "any sound at all".
+const BARGE_IN_FLOOR = 900;
+// Consecutive ~50 ms chunks above the threshold before Arin is cut off.
+// Speech sustains; a tap or a breath does not.
+const BARGE_IN_CHUNKS = 4;
 // How long a session may receive pure digital silence before the caller is
 // told their microphone is producing nothing.
 const SILENCE_WATCHDOG_MS = 5000;
@@ -1600,6 +1607,7 @@ async function startMicrophoneStream() {
   const AGC_MAX_GAIN = 24;
   const AGC_DECAY = 0.97;
   let agcPeak = 0;
+  let loudChunks = 0;
   let noiseFloor = 300;
   let lastGainLogged = 0;
 
@@ -1657,6 +1665,8 @@ async function startMicrophoneStream() {
       AGC_MAX_GAIN, Math.max(1, AGC_TARGET_PEAK / Math.max(agcPeak, 1))
     );
 
+    if (!agentIsAudible(MIC_GATE_TAIL_MS)) loudChunks = 0;
+
     if (app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)) {
       /*
        * The barge-in threshold must be RELATIVE to this microphone, not a
@@ -1665,8 +1675,23 @@ async function startMicrophoneStream() {
        * every time Arin spoke. Six times the noise floor separates speech
        * from room tone on both loud and quiet microphones.
        */
-      const bargeIn = Math.max(noiseFloor * 6, 120);
-      if (peak < bargeIn) {
+      const bargeIn = Math.max(noiseFloor * 6, BARGE_IN_FLOOR);
+
+      /*
+       * A single loud chunk is not an interruption.
+       *
+       * The floor collapses toward zero on a quiet microphone, so one
+       * keyboard tap or breath used to clear it — and because barge-in also
+       * calls hindiSpeaker.cancel(), which bumps the generation counter,
+       * every Hindi sentence still being synthesised was discarded for good.
+       * English recovered because AssemblyAI keeps streaming; Hindi could
+       * not, so it simply went quiet mid-reply.
+       *
+       * Real speech sustains. Require it across several consecutive chunks
+       * (~200 ms) before cutting Arin off.
+       */
+      loudChunks = peak >= bargeIn ? loudChunks + 1 : 0;
+      if (loudChunks < BARGE_IN_CHUNKS) {
         const wanted = Math.floor(int16.length / (rate / SAMPLE_RATE));
         if (!silence || silence.length !== wanted) silence = new Int16Array(wanted);
         send({ type: 'input.audio', audio: int16ToBase64(silence) });
