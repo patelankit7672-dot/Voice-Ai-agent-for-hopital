@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Varanasi Hospital AI Voice Assistant — book appointments, find doctors and get hospital information by voice, in Hindi or English." />
+  <meta name="description" content="Varanasi Hospital AI Voice Assistant — book appointments, find doctors and get hospital information by voice." />
   <meta name="color-scheme" content="light dark" />
   <!-- Apply the saved theme before first paint so the page never flashes light. -->
   <script>
@@ -107,19 +107,6 @@
       </p>
 
       <div class="mic-picker">
-        <label class="mic-picker__label" for="lang-select">Language</label>
-        <select id="lang-select" class="mic-picker__select">
-          <option value="auto">Auto-detect (Hindi or English)</option>
-          <option value="en">English only</option>
-          <option value="hi">हिंदी only (Hindi)</option>
-        </select>
-        <p class="mic-picker__note">
-          One language per conversation — the assistant will not mix them.
-          <span id="hindi-voice-note"></span>
-        </p>
-      </div>
-
-      <div class="mic-picker">
         <label class="mic-picker__label" for="output-select">Audio output</label>
         <p class="output-status" id="output-status">Checking audio devices…</p>
         <div class="mic-picker__row">
@@ -131,15 +118,6 @@
           </button>
         </div>
         <p class="mic-picker__note" id="output-note"></p>
-      </div>
-
-      <div class="mic-picker">
-        <label class="mic-picker__label" for="audio-setup">Audio setup</label>
-        <select id="audio-setup" class="mic-picker__select">
-          <option value="speakers">Laptop / phone speakers</option>
-          <option value="headphones">Headphones or earphones</option>
-        </select>
-        <p class="mic-picker__note" id="audio-setup-note"></p>
       </div>
 
       <div class="mic-picker">

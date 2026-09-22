@@ -27,17 +27,10 @@
 
 const SAMPLE_RATE = 24000;          // Voice Agent API requires 24 kHz PCM16
 const CHUNK_SECONDS = 0.05;         // ~50 ms per chunk, as the docs recommend
-const ECHO_GUARD_MS = 350;          // ignore voice activity while the agent is audible
-// How long after the agent stops to keep the microphone gated on speakers.
-// Covers the room's reverb tail, which the recogniser would otherwise hear.
-const MIC_GATE_TAIL_MS = 250;
-// Absolute floor for treating microphone input as the caller rather than
-// leakage. A quiet array's noise floor tends toward zero, so a purely
-// relative threshold degenerates to "any sound at all".
-const BARGE_IN_FLOOR = 900;
-// Consecutive ~50 ms chunks above the threshold before Arin is cut off.
-// Speech sustains; a tap or a breath does not.
-const BARGE_IN_CHUNKS = 4;
+// Ignore raw voice activity while the agent is audible: on speakers the
+// agent's own voice trips it. This suppresses a PLAYBACK flush only — it
+// never gates the microphone, which streams continuously either way.
+const ECHO_GUARD_MS = 350;
 // How long a session may receive pure digital silence before the caller is
 // told their microphone is producing nothing.
 const SILENCE_WATCHDOG_MS = 5000;
@@ -87,12 +80,9 @@ const el = {
   errorBox:         $('#error-box'),
   langNote:         $('#lang-note'),
   micSelect:        $('#mic-select'),
-  audioSetup:       $('#audio-setup'),
   outputSelect:     $('#output-select'),
   outputStatus:     $('#output-status'),
   outputNote:       $('#output-note'),
-  audioSetupNote:   $('#audio-setup-note'),
-  langSelect:       $('#lang-select'),
   micLevelHint:     $('#mic-level-hint'),
   emergencyBanner:  $('#emergency-banner'),
   emergencyHeadline:$('#emergency-headline'),
@@ -194,81 +184,6 @@ function resampleInt16(input, fromRate, toRate) {
  * UI state
  * ------------------------------------------------------------------ */
 
-/* ------------------------------------------------------------------ *
- * Hindi speech (Sarvam)
- *
- * AssemblyAI has no Hindi voice, so in a Hindi session its audio is ignored
- * and the agent's TEXT is sent to our own /api/speech/hindi, which voices it
- * with Sarvam's native Hindi model. The Sarvam key stays on the server; this
- * file only ever sends text and receives audio.
- *
- * Sentences are synthesised as soon as they complete rather than waiting for
- * the whole reply, so speech starts while the agent is still writing. A
- * single promise chain keeps them strictly in order — parallel requests would
- * otherwise resolve out of sequence and scramble the sentences.
- * ------------------------------------------------------------------ */
-
-const SENTENCE_END = /[।.!?]\s*$/;
-
-class HindiSpeaker {
-  constructor(player) {
-    this.player = player;
-    this.buffer = '';
-    this.chain = Promise.resolve();
-    this.generation = 0;      // bumped on interruption to drop stale audio
-    this.pending = 0;         // sentences being synthesised right now
-  }
-
-  /** Feed agent text as it arrives; speaks each completed sentence. */
-  push(textChunk) {
-    this.buffer += textChunk;
-    let match;
-    // Split on sentence boundaries so speech can start early.
-    while ((match = this.buffer.match(/^[\s\S]*?[।.!?]/))) {
-      const sentence = match[0];
-      this.buffer = this.buffer.slice(sentence.length);
-      this.speak(sentence.trim());
-    }
-  }
-
-  /** Speak whatever is left when the reply ends. */
-  flush() {
-    const rest = this.buffer.trim();
-    this.buffer = '';
-    if (rest) this.speak(rest);
-  }
-
-  speak(text) {
-    if (!text) return;
-    // A chunk of pure punctuation still returns audio from the service —
-    // measured at 2.3s for a lone "।" — which would be a stray noise between
-    // sentences. Only send something with an actual letter or digit in it.
-    if (!/[\p{L}\p{N}]/u.test(text)) return;
-    const generation = this.generation;
-    this.pending += 1;
-    this.chain = this.chain.then(async () => {
-      try {
-        if (generation !== this.generation) return;   // interrupted meanwhile
-        const body = await apiPost('/api/speech/hindi', { text });
-        if (generation !== this.generation || !this.player) return;
-        this.player.enqueue(base64ToInt16(body.audio));
-      } catch (err) {
-        // A failed sentence must not stop the rest of the reply.
-        console.warn('Hindi speech failed for one sentence:', err.message);
-      } finally {
-        this.pending = Math.max(0, this.pending - 1);
-      }
-    });
-  }
-
-  /** Drop queued and in-flight speech — the caller interrupted. */
-  cancel() {
-    this.generation += 1;
-    this.pending = 0;
-    this.buffer = '';
-  }
-}
-
 /**
  * Is the agent's voice currently coming out of the speakers, or about to be?
  *
@@ -279,7 +194,6 @@ class HindiSpeaker {
  *   3. Hindi sentences are still being synthesised over the network
  */
 function agentIsAudible(tailMs = ECHO_GUARD_MS) {
-  if (app.hindiSpeaker && app.hindiSpeaker.pending > 0) return true;
   if (!app.player) return false;
   if (app.player.isPlaying) return true;
   return Date.now() - app.player.lastEnqueueAt < tailMs;
@@ -425,8 +339,6 @@ function initTheme() {
 /* --- microphone selection -------------------------------------------- */
 
 const MIC_PREF_KEY = 'varanasi.micDeviceId';
-const LANG_PREF_KEY = 'varanasi.language';
-const AUDIO_SETUP_KEY = 'varanasi.audioSetup';
 
 /**
  * Fill the picker with the real input devices. Labels are only exposed once
@@ -712,70 +624,39 @@ const timings = {
 };
 
 /**
- * Refuse to put a Bluetooth headset into hands-free mode.
+ * Warn about a Bluetooth profile clash - but never decide for the caller.
  *
- * Bluetooth carries ONE profile at a time. A2DP gives high-quality playback
- * and no microphone; HFP gives a microphone and narrowband playback. Windows
- * exposes them as separate endpoints that share a `groupId`, because they are
- * the same physical device.
+ * Bluetooth carries ONE profile at a time: A2DP is high-quality playback with
+ * no microphone; HFP is a microphone with narrowband playback. Capturing from
+ * the headset therefore drags its own playback quality down.
  *
- * Capturing from the headset therefore forces the whole device into HFP, and
- * that does two things at once: the A2DP "Headphones" endpoint stops
- * producing sound, so audio routed there is simply inaudible; and anything
- * that does play comes through an 8-16 kHz narrowband channel, which sounds
- * crackly. Both complaints, one cause.
- *
- * So when the caller is listening on a Bluetooth device, never capture from
- * that same device if any other microphone exists.
- *
- * Returns the deviceId to capture from, or '' for the system default.
+ * An earlier version silently switched the microphone based on which OUTPUT
+ * device was selected. That made input depend on output, which is exactly the
+ * coupling that must stay out of this code. Say it; do not act on it.
  */
-async function resolveMicrophoneChoice() {
-  const chosen = (el.micSelect && el.micSelect.value) || '';
-  const wantedOutput = (el.outputSelect && el.outputSelect.value) || '';
-  if (!navigator.mediaDevices?.enumerateDevices) return chosen;
-
+async function warnAboutBluetoothProfileClash() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   let devices;
   try {
     devices = await navigator.mediaDevices.enumerateDevices();
   } catch {
-    return chosen;
+    return;
   }
 
-  const outputs = devices.filter((d) => d.kind === 'audiooutput');
-  const inputs = devices.filter(
-    (d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'communications'
-  );
+  const micId = (el.micSelect && el.micSelect.value) || '';
+  const outId = (el.outputSelect && el.outputSelect.value) || '';
+  if (!micId || !outId) return;
 
-  // Which device are we listening on? An explicit pick, else the default.
-  const output = outputs.find((d) => d.deviceId === wantedOutput)
-    || outputs.find((d) => d.deviceId === 'default')
-    || outputs[0];
-  if (!output) return chosen;
+  const mic = devices.find((d) => d.kind === 'audioinput' && d.deviceId === micId);
+  const out = devices.find((d) => d.kind === 'audiooutput' && d.deviceId === outId);
+  if (!mic || !out || !mic.groupId || mic.groupId !== out.groupId) return;
 
-  const bluetoothOutput = /bluetooth|headphone|headset|airpod|buds/i.test(output.label || '');
-  if (!bluetoothOutput || !output.groupId) return chosen;
-
-  const micDevice = inputs.find((d) => d.deviceId === chosen);
-  const conflicts = (d) => d && d.groupId && d.groupId === output.groupId;
-
-  // An explicit pick that does not clash is respected as-is.
-  if (chosen && !conflicts(micDevice)) return chosen;
-  // The default might clash too, and we cannot inspect it directly, so only
-  // intervene when we can name a clearly independent alternative.
-  const independent = inputs.find(
-    (d) => d.groupId !== output.groupId && !/bluetooth/i.test(d.label || '')
-  );
-  if (!independent) return chosen;
-  if (!chosen && !inputs.some(conflicts)) return chosen;
-
-  if (el.micSelect) el.micSelect.value = independent.deviceId;
   setMicHint(
-    `Using ${independent.label || 'the built-in microphone'} so your Bluetooth `
-    + 'headset stays in high-quality audio mode.',
-    null
+    `${mic.label || 'That microphone'} belongs to the same Bluetooth device you are `
+    + 'listening on, so the headset will drop to call quality. Choosing a different '
+    + 'microphone keeps playback at full quality.',
+    'bad'
   );
-  return independent.deviceId;
 }
 
 /**
@@ -949,9 +830,7 @@ async function testVoiceOutput() {
     const sink = await audioOutput.attach(ctx, el.outputSelect ? el.outputSelect.value : '');
     const player = new AudioPlayer(ctx, sink);
 
-    const sample = app.config && app.config.hindi_voice_available
-      ? 'नमस्ते, मैं आरिन हूँ। क्या आप मुझे सुन पा रहे हैं?'
-      : 'Hello, this is Arin. Can you hear me clearly?';
+    const sample = 'Hello, this is Arin. Can you hear me clearly?';
     const body = await apiPost('/api/speech/hindi', { text: sample });
     player.enqueue(base64ToInt16(body.audio));
     await new Promise((r) => setTimeout(r, (body.seconds + 0.6) * 1000));
@@ -1370,8 +1249,6 @@ const app = {
   autoSwitching: false,
   connectTimeout: null,
   sawRealAudio: false,
-  hindiSpeaker: null,
-  speakerMode: true,   // half-duplex unless headphones are selected
   config: null,
   intentionalClose: false,
 };
@@ -1436,10 +1313,15 @@ async function startVoiceSession() {
      * leaving AEC on only costs sensitivity — it behaves as a noise gate and
      * can duck a softly spoken caller.
      */
-    app.speakerMode = !(el.audioSetup && el.audioSetup.value === 'headphones');
+    /*
+     * INPUT constraints are fixed and independent of playback. Echo
+     * cancellation stays ON even on headphones: it costs nothing there, and
+     * switching it off was another route for the output setting to change how
+     * capture behaved.
+     */
     const audio = {
-      echoCancellation: app.speakerMode,
-      noiseSuppression: false,
+      echoCancellation: true,
+      noiseSuppression: true,
       autoGainControl: true,
     };
     // An explicitly chosen device wins over the operating system default,
@@ -1447,8 +1329,11 @@ async function startVoiceSession() {
     // and never the Bluetooth device the caller is listening on, because
     // capturing from it would force the headset into narrowband hands-free
     // mode and silence the high-quality output endpoint.
-    const chosen = await resolveMicrophoneChoice();
+    // INPUT ONLY. This id comes from the microphone selector and nowhere
+    // else - never from the output/headphone selector.
+    const chosen = (el.micSelect && el.micSelect.value) || '';
     if (chosen) audio.deviceId = { exact: chosen };
+    warnAboutBluetoothProfileClash();
 
     /*
      * The token request does NOT depend on the microphone, so start it now
@@ -1463,8 +1348,8 @@ async function startVoiceSession() {
      * rejection while the microphone prompt is still open; the real error is
      * handled where the value is consumed.
      */
-    const lang = (el.langSelect && el.langSelect.value) || 'auto';
-    tokenPromise = apiGet(`/api/voice-token?lang=${encodeURIComponent(lang)}`);
+    // English only: one language, one speech provider, no per-session choice.
+    tokenPromise = apiGet('/api/voice-token?lang=en');
     tokenPromise.catch(() => {});
 
     app.mediaStream = await navigator.mediaDevices.getUserMedia({ audio });
@@ -1537,11 +1422,6 @@ async function startVoiceSession() {
     // Hindi sessions are voiced by Sarvam through our own server, because
     // AssemblyAI has no Hindi voice. Only engage it when the server actually
     // has a Sarvam key, otherwise fall back to AssemblyAI's romanised speech.
-    const wantsHindi = (el.langSelect && el.langSelect.value) === 'hi';
-    app.hindiSpeaker =
-      wantsHindi && app.config && app.config.hindi_voice_available
-        ? new HindiSpeaker(app.player)
-        : null;
   } catch (err) {
     setState('error');
     showError(`Audio could not be initialised: ${err.message}`);
@@ -1784,43 +1664,19 @@ async function startMicrophoneStream() {
       AGC_MAX_GAIN, Math.max(1, AGC_TARGET_PEAK / Math.max(agcPeak, 1))
     );
 
-    if (!agentIsAudible(MIC_GATE_TAIL_MS)) loudChunks = 0;
-
-    if (app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)) {
-      /*
-       * The barge-in threshold must be RELATIVE to this microphone, not a
-       * fixed number. A fixed 3000 sat five times above the loudest word a
-       * quiet array produced, so on that hardware the caller was silenced
-       * every time Arin spoke. Six times the noise floor separates speech
-       * from room tone on both loud and quiet microphones.
-       */
-      const bargeIn = Math.max(noiseFloor * 6, BARGE_IN_FLOOR);
-
-      /*
-       * A single loud chunk is not an interruption.
-       *
-       * The floor collapses toward zero on a quiet microphone, so one
-       * keyboard tap or breath used to clear it — and because barge-in also
-       * calls hindiSpeaker.cancel(), which bumps the generation counter,
-       * every Hindi sentence still being synthesised was discarded for good.
-       * English recovered because AssemblyAI keeps streaming; Hindi could
-       * not, so it simply went quiet mid-reply.
-       *
-       * Real speech sustains. Require it across several consecutive chunks
-       * (~200 ms) before cutting Arin off.
-       */
-      loudChunks = peak >= bargeIn ? loudChunks + 1 : 0;
-      if (loudChunks < BARGE_IN_CHUNKS) {
-        const wanted = Math.floor(int16.length / (rate / SAMPLE_RATE));
-        if (!silence || silence.length !== wanted) silence = new Int16Array(wanted);
-        send({ type: 'input.audio', audio: int16ToBase64(silence) });
-        return;
-      }
-      // Loud enough to be the caller, not leakage: stop the agent and let
-      // this through, so the interruption is heard from its first word.
-      if (app.player) app.player.flush();
-      if (app.hindiSpeaker) app.hindiSpeaker.cancel();
-    }
+    /*
+     * The microphone is NEVER gated by the output device.
+     *
+     * This used to run half duplex whenever the caller was on speakers: while
+     * Arin was audible the client sent silence instead of the room. That made
+     * an OUTPUT setting decide whether INPUT reached the recogniser, and it is
+     * exactly why the agent could hear the caller with headphones and not
+     * without them - headphones simply switched the gate off.
+     *
+     * Echo is the browser's job now: echoCancellation is on for every session.
+     * A genuine interruption is detected from recognised WORDS in
+     * transcript.user.delta, which speaker bleed cannot fake.
+     */
 
     // Amplify before resampling so the interpolation works on the louder
     // signal, then resample to the 24 kHz the API expects.
@@ -1965,7 +1821,6 @@ function handleServerEvent(message) {
       // This is the trustworthy interruption signal, so flush playback here.
       if (app.player && app.agentTurnActive) {
         app.player.flush();
-        if (app.hindiSpeaker) app.hindiSpeaker.cancel();
       }
       if (!transcriptState.userPartial) {
         transcriptState.userPartial = addBubble('user', text, { partial: true });
@@ -1995,9 +1850,6 @@ function handleServerEvent(message) {
       break;
 
     case 'reply.audio': {
-      // In a Hindi session AssemblyAI's English voice is not used at all;
-      // Sarvam speaks the reply instead, driven by transcript.agent.delta.
-      if (app.hindiSpeaker) break;
       const encoded = message.data || message.audio;
       if (!encoded || !app.player) break;
       try {
@@ -2011,10 +1863,6 @@ function handleServerEvent(message) {
     case 'transcript.agent.delta': {
       const word = message.delta || '';
       if (!word) break;
-      if (app.hindiSpeaker) {
-        const separator = /^[\s.,!?;:।]/.test(word) ? '' : ' ';
-        app.hindiSpeaker.push(separator + word);
-      }
       if (!transcriptState.agentPartial) {
         transcriptState.agentPartial = addBubble('agent', word, { partial: true });
       } else {
@@ -2041,7 +1889,6 @@ function handleServerEvent(message) {
 
     case 'reply.done':
       app.agentTurnActive = false;
-      if (app.hindiSpeaker) app.hindiSpeaker.flush();
       if (transcriptState.agentPartial) {
         finalizeBubble(transcriptState.agentPartial);
         transcriptState.agentPartial = null;
@@ -2193,7 +2040,6 @@ async function teardown() {
   app.sessionId = null;
   hideToolActivity();
 
-  if (app.hindiSpeaker) { app.hindiSpeaker.cancel(); app.hindiSpeaker = null; }
   audioOutput.detach();
   if (app.player) { app.player.flush(); app.player = null; }
 
@@ -2711,42 +2557,6 @@ async function init() {
 
   initTheme();
 
-  if (el.langSelect) {
-    try {
-      const savedLang = localStorage.getItem(LANG_PREF_KEY);
-      if (savedLang) el.langSelect.value = savedLang;
-    } catch { /* ignore */ }
-    el.langSelect.addEventListener('change', () => {
-      try { localStorage.setItem(LANG_PREF_KEY, el.langSelect.value); } catch { /* ignore */ }
-      if (isActive()) {
-        showError('Language changed. Press End, then Start again to apply it.');
-      }
-    });
-  }
-
-  if (el.audioSetup) {
-    try {
-      const saved = localStorage.getItem(AUDIO_SETUP_KEY);
-      if (saved) el.audioSetup.value = saved;
-    } catch { /* ignore */ }
-
-    const describeSetup = () => {
-      const headphones = el.audioSetup.value === 'headphones';
-      el.audioSetupNote.textContent = headphones
-        ? 'Full duplex — you can interrupt the assistant mid-sentence.'
-        : 'The microphone pauses while the assistant speaks, so it does not hear itself.';
-    };
-    describeSetup();
-
-    el.audioSetup.addEventListener('change', () => {
-      try { localStorage.setItem(AUDIO_SETUP_KEY, el.audioSetup.value); } catch { /* ignore */ }
-      describeSetup();
-      if (isActive()) {
-        showError('Audio setup changed. Press End, then Start again to apply it.');
-      }
-    });
-  }
-
   refreshOutputDevices();
   if (el.outputSelect) {
     el.outputSelect.addEventListener('change', () => {
@@ -2777,12 +2587,6 @@ async function init() {
   try {
     const config = await apiGet('/api/config');
     app.config = config;
-    const hindiNote = $('#hindi-voice-note');
-    if (hindiNote) {
-      hindiNote.textContent = config.hindi_voice_available
-        ? 'Hindi is spoken by a native Hindi voice.'
-        : 'Hindi is spoken by an English-accent voice in Roman letters.';
-    }
     if (config.spoken_language_notice) {
       el.langNote.textContent = `ℹ️ ${config.spoken_language_notice}`;
       el.langNote.hidden = false;

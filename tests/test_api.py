@@ -815,33 +815,26 @@ def test_prompt_forbids_mixing_languages_in_a_sentence():
         assert "mirror their mix" not in prompt, mode
 
 
-def test_voice_token_accepts_a_language(client, monkeypatch):
+def test_every_session_is_english(client, monkeypatch):
     """
-    The caller's language choice reaches the session config — through the
-    prompt and greeting, which is where it actually takes effect.
+    The assistant speaks one language. Whatever a caller asks for, the session
+    comes back English — no Devanagari greeting, no second speech provider in
+    the path.
     """
     from backend import main
+    from backend.assemblyai_service import normalise_language_mode
+
+    for asked in ("hi", "auto", "xx", None, ""):
+        assert normalise_language_mode(asked) == "en", asked
 
     async def fake_token():
         return {"token": "test-token", "expires_in_seconds": 120}
 
     monkeypatch.setattr(main, "create_voice_token", fake_token)
-
-    hindi = client.get("/api/voice-token?lang=hi").json()["session_config"]
-    # Hindi either way: Devanagari with a native voice, romanised without one.
-    assert _has_devanagari(hindi["greeting"]) or "Namaste" in hindi["greeting"]
-
-    english = client.get("/api/voice-token?lang=en").json()["session_config"]
-    assert english["greeting"].startswith("Hello")
-    assert "chosen ENGLISH" in english["system_prompt"]
-
-    # Recognition stays code-switching in both, so a caller is never cut off
-    # for using a word from the other language.
-    assert hindi["input"]["language_codes"] == english["input"]["language_codes"]
-
-
-# ---------------------------------------------------------------- security
-
+    for asked in ("hi", "auto", "en"):
+        cfg = client.get(f"/api/voice-token?lang={asked}").json()["session_config"]
+        assert cfg["greeting"].startswith("Hello"), asked
+        assert not _has_devanagari(cfg["greeting"]), asked
 
 def test_appointment_register_is_not_public(client):
     """
@@ -1019,29 +1012,17 @@ def test_hindi_speech_returns_pcm(client, monkeypatch):
     assert base64.b64decode(body["audio"]) == pcm
 
 
-def test_echo_guard_is_anchored_to_audible_audio_not_the_turn_start():
+def test_echo_guard_is_anchored_to_audible_audio():
     """
-    Regression: the guard used to compare against `reply.started`.
-
-    Hindi is voiced by Sarvam over HTTP, so speech begins a network round-trip
-    after the turn starts. A guard measured from reply.started had already
-    expired by then, and at session start its anchor was 0 — so any room noise
-    flushed the whole greeting before it was even synthesised. The guard must
-    key off audio that is actually playing or in flight.
+    The guard that suppresses playback flushes keys off audio that is actually
+    playing, not off `reply.started` — which expired before a network-fed
+    reply had even begun speaking.
     """
     app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
         encoding="utf-8"
     )
     assert "function agentIsAudible(" in app_js
-    assert "!agentIsAudible()" in app_js, "the VAD flush must consult the guard"
-    # The old anchor must not come back as executable code.
     assert "Date.now() - app.replyStartedAt" not in app_js
-    # The guard must consider synthesis still in flight, not just playback.
-    assert "hindiSpeaker.pending > 0" in app_js
-
-
-# ---------------------------------------------------------------- deployment
-
 
 def test_serverless_store_moves_off_the_read_only_bundle(monkeypatch):
     """
@@ -1100,40 +1081,32 @@ def test_vercel_entrypoint_exports_the_real_app():
     assert serverless_app is real_app
 
 
-def test_microphone_is_gated_while_the_agent_speaks_on_speakers():
+def test_microphone_is_never_gated_by_the_output_device():
     """
-    Regression: the microphone streamed continuously, so on laptop speakers
-    the agent's own voice went back into the recogniser and the caller was
-    not understood. The giveaway was that headphones worked and speakers did
-    not — headphones are the only case with no speaker-to-microphone path.
+    THE BUG: the agent could hear the caller with headphones and not without.
 
-    While the agent is audible the client must send silence, not the room.
-    Silence keeps the stream continuous for turn detection; sending nothing
-    would look like a stalled connection.
+    Capture ran half duplex whenever the caller was on speakers — while Arin
+    was audible the client sent silence instead of the room. Selecting
+    headphones set `speakerMode` false, which switched that gate off. So an
+    OUTPUT setting decided whether INPUT reached the recogniser.
+
+    Input and output must stay independent. Echo is the browser's job.
     """
     app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
         encoding="utf-8"
     )
-    assert "app.speakerMode && agentIsAudible(MIC_GATE_TAIL_MS)" in app_js
-    assert "MIC_GATE_TAIL_MS" in app_js
-    # Suppression is by LEVEL, not by time. Muting for the whole reply meant a
-    # caller who spoke during a thirty-second answer was ignored throughout;
-    # measured, quiet leakage (peak 1019) is silenced while speech (25479)
-    # passes and interrupts.
-    # The threshold is RELATIVE to the microphone. A fixed value sat five
-    # times above the loudest word a quiet laptop array produced (589 of
-    # 32767, about -35 dBFS), silencing that caller whenever Arin spoke.
-    assert "noiseFloor * 6" in app_js
-    # Suppression is decided by a sustained run of loud chunks, not one
-    # sample — see test_barge_in_requires_sustained_speech_not_a_single_blip.
-    assert "peak >= bargeIn" in app_js
-    assert "loudChunks" in app_js
-    assert "BARGE_IN_THRESHOLD" not in app_js, "fixed threshold must not return"
-    # Headphone users keep full duplex so they can still interrupt.
-    assert "el.audioSetup.value === 'headphones'" in app_js
-    # Echo cancellation follows the setup rather than being hard-coded on.
-    assert "echoCancellation: app.speakerMode" in app_js
+    assert "speakerMode" not in app_js, "an output setting must not gate capture"
+    assert "audioSetup" not in app_js, "the speakers/headphones coupling is gone"
 
+    # Constraints are fixed, not derived from playback.
+    assert "echoCancellation: true" in app_js
+    assert "noiseSuppression: true" in app_js
+    assert "autoGainControl: true" in app_js
+    assert "echoCancellation: app.speakerMode" not in app_js
+
+    # The capture device comes from the microphone selector alone.
+    assert "const chosen = (el.micSelect && el.micSelect.value) || '';" in app_js
+    assert "resolveMicrophoneChoice" not in app_js
 
 def test_audio_output_manager_handles_all_support_levels():
     """
@@ -1359,63 +1332,38 @@ def test_playback_continues_seamlessly_instead_of_inserting_gaps():
     assert "COALESCE_MAX_WAIT_MS" in app_js
 
 
-def test_barge_in_requires_sustained_speech_not_a_single_blip():
+def test_interruption_comes_from_recognised_words_only():
     """
-    Hindi went silent mid-reply while English was fine.
-
-    Barge-in used a threshold of max(noiseFloor * 6, 120). On a quiet array
-    the noise floor tends toward zero, so the floor of 120 — about 0.004 of
-    full scale — was cleared by a keyboard tap or a breath. Barge-in also
-    calls hindiSpeaker.cancel(), which bumps the generation counter and drops
-    every sentence still being synthesised. English recovered because
-    AssemblyAI keeps streaming; Hindi had nothing left to play.
-
-    Verified in a browser during a Hindi reply:
-      three 60 ms blips  -> 4 sentences still spoken, generation stayed 0
-      1.2 s of sound     -> generation 0 -> 1, playback stopped (barge-in)
+    Interruption is driven by transcript.user.delta — actual recognised words,
+    which speaker bleed cannot fake — rather than by raw microphone level.
+    Level-based barge-in went away with the half-duplex gate.
     """
     app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
         encoding="utf-8"
     )
-    assert "BARGE_IN_FLOOR" in app_js
-    assert "BARGE_IN_CHUNKS" in app_js
-    assert "loudChunks < BARGE_IN_CHUNKS" in app_js
-    # The old degenerate floor must not come back.
-    assert "Math.max(noiseFloor * 6, 120)" not in app_js
-    # The run must reset between turns rather than accumulating.
-    assert "if (!agentIsAudible(MIC_GATE_TAIL_MS)) loudChunks = 0;" in app_js
+    assert "case 'transcript.user.delta'" in app_js
+    assert "BARGE_IN_FLOOR" not in app_js
+    assert "BARGE_IN_CHUNKS" not in app_js
 
-
-def test_bluetooth_profile_conflict_is_avoided():
+def test_bluetooth_profile_clash_is_reported_not_acted_on():
     """
-    "No Hindi audio at all" and "the voice cracks" were one cause.
-
-    Bluetooth carries ONE profile at a time. A2DP is high-quality playback
-    with no microphone; HFP is a microphone with 8-16 kHz narrowband
-    playback. Windows exposes them as separate endpoints sharing a groupId,
-    because they are the same physical device.
-
-    Capturing from the headset forces the device into HFP, which kills the
-    A2DP output endpoint — audio routed there is inaudible — and degrades
-    anything that does play to narrowband, which sounds crackly.
-
-    Verified in a browser with the reporter's topology (headset mic and
-    headset output sharing a groupId):
-      bluetooth output + bluetooth mic -> resolved to the built-in array
-      speaker output   + bluetooth mic -> respected, no conflict
-      bluetooth output + built-in mic  -> left alone
-      bluetooth output, no other input -> respected, nothing to switch to
+    A Bluetooth headset carries one profile at a time, so capturing from it
+    drags its own playback down to call quality. That is worth saying — but
+    an earlier version SWITCHED the microphone based on the output device,
+    which reintroduced exactly the input/output coupling this fix removes.
+    Tell the caller; let the caller decide.
     """
     app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
         encoding="utf-8"
     )
-    assert "async function resolveMicrophoneChoice()" in app_js
-    # The link between the two endpoints is groupId, not the label.
-    assert "d.groupId === output.groupId" in app_js or "d.groupId !== output.groupId" in app_js
-    assert "const chosen = await resolveMicrophoneChoice();" in app_js
-    # Only intervene when there is a genuinely independent alternative.
-    assert "if (!independent) return chosen;" in app_js
-
+    assert "warnAboutBluetoothProfileClash" in app_js
+    assert "mic.groupId !== out.groupId" in app_js
+    # It must only warn: no assignment to the microphone selector.
+    warn_start = app_js.index("async function warnAboutBluetoothProfileClash()")
+    warn_end = app_js.index("\n}", warn_start)
+    body = app_js[warn_start:warn_end]
+    assert "el.micSelect.value =" not in body, "warning must not change the device"
+    assert "setMicHint(" in body
 
 def test_audio_is_resampled_once_with_continuity_across_buffers():
     """

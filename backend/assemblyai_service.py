@@ -164,12 +164,16 @@ async def create_voice_token() -> Dict[str, Any]:
 
 
 # Language modes a caller can choose for a session.
-LANGUAGE_MODES = ("auto", "en", "hi")
+# English only. The assistant speaks one language, so there is no per-session
+# choice and no second speech provider in the path. The Hindi code paths below
+# are retained but unreachable, so the capability can be restored by widening
+# this tuple without rebuilding the prompt logic.
+LANGUAGE_MODES = ("en",)
 
 
 def normalise_language_mode(mode: Optional[str]) -> str:
-    mode = (mode or "").strip().lower()
-    return mode if mode in LANGUAGE_MODES else "auto"
+    """Every session is English, whatever the caller asks for."""
+    return "en"
 
 
 # The single most important rule for Hindi, and the least obvious.

@@ -195,7 +195,8 @@ async def voice_config() -> VoiceConfigResponse:
         language_codes=list(settings.language_codes),
         voice_id=settings.voice_id,
         spoken_language_notice=spoken_language_notice(),
-        hindi_voice_available=settings.hindi_voice_available,
+        # English only: no second speech provider is used.
+        hindi_voice_available=False,
     )
 
 
