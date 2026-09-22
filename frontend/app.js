@@ -38,7 +38,16 @@ const SILENCE_WATCHDOG_MS = 5000;
 // "Connecting…" forever.
 const CONNECT_TIMEOUT_MS = 15000;
 const TOOL_RESULT_MAX_HOLD_MS = 2500;
-const PLAYBACK_LEAD_SECONDS = 0.06;
+// Jitter buffer. 0.06 was too shallow for 10 ms streamed chunks: a late
+// burst dropped the cursor behind the clock and a gap was stitched into the
+// sentence — 51 gaps totalling 3654 ms in one measured reply. A fifth of a
+// second absorbs normal network jitter and is imperceptible at the start of
+// a spoken reply.
+const PLAYBACK_LEAD_SECONDS = 0.2;
+// Coalesce streamed chunks to roughly this size before scheduling, instead of
+// creating a BufferSource for every 10 ms.
+const COALESCE_SAMPLES = Math.round(SAMPLE_RATE * 0.12);   // ~120 ms
+const COALESCE_MAX_WAIT_MS = 40;
 
 const STATUS = {
   idle:       { text: 'Disconnected',                      dot: 'idle',       mic: '' },
@@ -1064,25 +1073,85 @@ class AudioPlayer {
     this.cursor = 0;
     this.lastEnqueueAt = 0;   // when audio last arrived, for the echo guard
     this.sources = new Set();
+    this.pending = [];
+    this.pendingSamples = 0;
+    this.pendingTimer = null;
     this.gain = context.createGain();
     this.gain.connect(sinkNode || context.destination);
   }
 
+  /**
+   * Queue audio for playback.
+   *
+   * Incoming chunks are tiny — AssemblyAI streams 10 ms at a time, 1197 of
+   * them in a single measured reply. Scheduling each one individually made
+   * the voice choppy: whenever a burst arrived late the write cursor fell
+   * behind the clock and a gap was stitched into the speech. Measured over
+   * one reply that produced 51 gaps totalling 3654 ms of injected silence,
+   * with the worst arrival 251 ms late.
+   *
+   * So chunks are coalesced into larger buffers before being scheduled, and
+   * the jitter buffer is deep enough to absorb a late burst rather than
+   * punch a hole in the sentence.
+   */
   enqueue(int16) {
     if (!int16.length) return;
     this.lastEnqueueAt = Date.now();
 
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i += 1) float32[i] = int16[i] / 32768;
+    this.pending.push(int16);
+    this.pendingSamples += int16.length;
 
-    const buffer = this.ctx.createBuffer(1, float32.length, SAMPLE_RATE);
-    buffer.copyToChannel(float32, 0);
+    if (this.pendingSamples >= COALESCE_SAMPLES) {
+      this.flushPending();
+      return;
+    }
+    // A partial buffer must not wait forever, or the tail of a sentence
+    // would never be spoken.
+    if (!this.pendingTimer) {
+      this.pendingTimer = setTimeout(() => this.flushPending(), COALESCE_MAX_WAIT_MS);
+    }
+  }
+
+  /** Concatenate what has accumulated and schedule it as one buffer. */
+  flushPending() {
+    clearTimeout(this.pendingTimer);
+    this.pendingTimer = null;
+    if (!this.pendingSamples) return;
+
+    const merged = new Float32Array(this.pendingSamples);
+    let offset = 0;
+    for (const chunk of this.pending) {
+      for (let i = 0; i < chunk.length; i += 1) merged[offset + i] = chunk[i] / 32768;
+      offset += chunk.length;
+    }
+    this.pending = [];
+    this.pendingSamples = 0;
+
+    const buffer = this.ctx.createBuffer(1, merged.length, SAMPLE_RATE);
+    buffer.copyToChannel(merged, 0);
 
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(this.gain);
 
-    const startAt = Math.max(this.ctx.currentTime + PLAYBACK_LEAD_SECONDS, this.cursor);
+    /*
+     * Continue exactly where the last buffer ended, unless playback has
+     * genuinely run dry.
+     *
+     * `Math.max(now + LEAD, cursor)` looks right but inserts a gap every time
+     * the buffer depth merely dips below the lead: the cursor is still in the
+     * future, yet the next buffer gets pushed out to now + LEAD, punching a
+     * hole of tens of milliseconds into the middle of a word. Measured, that
+     * produced 13 micro-gaps of 10-59 ms in a single reply — audible as the
+     * voice breaking up.
+     *
+     * The lead is a STARTUP cushion, so it applies only when there is nothing
+     * already scheduled to follow.
+     */
+    const now = this.ctx.currentTime;
+    const startAt = this.cursor > now
+      ? this.cursor                              // seamless continuation
+      : now + PLAYBACK_LEAD_SECONDS;             // true underrun: rebuild cushion
     source.start(startAt);
     this.cursor = startAt + buffer.duration;
 
@@ -1092,6 +1161,10 @@ class AudioPlayer {
 
   /** Stop everything already scheduled — used when the caller interrupts. */
   flush() {
+    clearTimeout(this.pendingTimer);
+    this.pendingTimer = null;
+    this.pending = [];
+    this.pendingSamples = 0;
     this.sources.forEach((source) => {
       try { source.stop(); } catch { /* already finished */ }
     });

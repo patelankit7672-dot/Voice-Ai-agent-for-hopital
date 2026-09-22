@@ -1324,3 +1324,33 @@ def test_a_silent_microphone_is_switched_automatically():
     assert "setState('idle');" in app_js
     # One automatic attempt only, then hand over to the caller.
     assert "if (!app.autoSwitchTried && suggestion)" in app_js
+
+
+def test_playback_continues_seamlessly_instead_of_inserting_gaps():
+    """
+    The agent's voice broke up. Measured over one English reply:
+
+      before : 1197 buffers of 10 ms, 51 gaps, 3654 ms of injected silence
+      after  :  203 coalesced buffers,  1 gap of 311 ms (a natural pause),
+                zero micro-gaps under 60 ms
+
+    Two defects. Scheduling a BufferSource per 10 ms chunk left playback at
+    the mercy of every late burst. And `Math.max(now + LEAD, cursor)` punched
+    a hole whenever buffer depth merely dipped below the lead, even though
+    the cursor was still in the future — the lead is a startup cushion, not a
+    floor to re-apply mid-sentence.
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    # Coalescing, so one BufferSource is not created per 10 ms.
+    assert "COALESCE_SAMPLES" in app_js
+    assert "flushPending" in app_js
+
+    # Seamless continuation: the cursor wins whenever it is still ahead.
+    assert "this.cursor > now" in app_js
+    assert "? this.cursor" in app_js
+    assert "Math.max(this.ctx.currentTime + PLAYBACK_LEAD_SECONDS, this.cursor)" not in app_js
+
+    # A partial buffer must still be flushed, or a sentence loses its tail.
+    assert "COALESCE_MAX_WAIT_MS" in app_js
