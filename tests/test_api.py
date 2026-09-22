@@ -1390,3 +1390,41 @@ def test_audio_is_resampled_once_with_continuity_across_buffers():
     # Continuity state, and it must reset when playback restarts.
     assert "this.resamplePos" in app_js
     assert "this.resamplePrev" in app_js
+
+
+def test_weak_microphone_falls_back_to_raw_capture():
+    """
+    Browser echo cancellation and noise suppression assume a microphone at
+    normal level. The reporter's array peaks at 589 of 32767 — about ten
+    times below normal speech — so processing can classify that speech as
+    noise and remove it, leaving a live track carrying nothing usable.
+
+    Notably, the configuration that WORKED for them (headphones) had both
+    switched off; the one that failed had echo cancellation on. Turning both
+    on for everyone therefore risked breaking the case that worked.
+
+    Processing stays on by default and is dropped automatically when the
+    signal proves too weak to survive it. Verified in a browser: getUserMedia
+    was called twice, second time with echoCancellation and noiseSuppression
+    both false.
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "retryWithRawAudio" in app_js
+    assert "app.rawAudioRetried" in app_js
+    assert "{ echoCancellation: false, noiseSuppression: false, autoGainControl: true }" in app_js
+    # Only once — it must not loop reopening the device.
+    assert "if (app.rawAudioRetried) return false;" in app_js
+    # And the decision is about SIGNAL, never about the output device.
+    assert "app.maxRawPeak < WEAK_PEAK" in app_js
+    assert "speakerMode" not in app_js
+
+
+def test_live_microphone_level_is_visible_without_a_console():
+    """A caller should see whether they are being picked up."""
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "function reportLiveLevel(" in app_js
+    assert "reportLiveLevel(peak);" in app_js

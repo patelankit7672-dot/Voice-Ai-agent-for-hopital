@@ -660,6 +660,50 @@ async function warnAboutBluetoothProfileClash() {
 }
 
 /**
+ * Show the live microphone level during a session, so a caller can see
+ * whether they are being picked up without opening a console.
+ */
+let liveLevelPeak = 0;
+let liveLevelAt = 0;
+function reportLiveLevel(peak) {
+  if (peak > liveLevelPeak) liveLevelPeak = peak;
+  const now = Date.now();
+  if (now - liveLevelAt < 150) return;
+  liveLevelAt = now;
+
+  const meter = $('#mic-meter');
+  const fill = $('#mic-meter-fill');
+  if (meter && fill) {
+    meter.hidden = false;
+    fill.style.width = `${Math.min(100, Math.sqrt(liveLevelPeak / 32767) * 140)}%`;
+  }
+  liveLevelPeak = 0;
+}
+
+/**
+ * Reopen the microphone without browser audio processing.
+ *
+ * Echo cancellation and noise suppression assume a microphone at normal
+ * level. On a very quiet array they can remove the caller's speech as if it
+ * were noise, leaving a live track that carries nothing usable — audio
+ * arrives, and recognition never fires.
+ */
+async function retryWithRawAudio(reason) {
+  if (app.rawAudioRetried) return false;
+  app.rawAudioRetried = true;
+  showError(
+    `${reason} Reopening the microphone without noise suppression, which can `
+    + 'remove speech from a quiet microphone. Reconnecting…'
+  );
+  app.intentionalClose = true;
+  app.autoSwitching = true;
+  await teardown();
+  setState('idle');
+  setTimeout(() => { app.autoSwitching = false; startVoiceSession(); }, 400);
+  return true;
+}
+
+/**
  * Watch for a microphone that is delivering literal digital silence.
  *
  * The commonest cause is a Bluetooth headset. Bluetooth cannot do
@@ -675,8 +719,23 @@ async function warnAboutBluetoothProfileClash() {
 function startSilenceWatchdog() {
   stopSilenceWatchdog();
   app.sawRealAudio = false;
+  app.maxRawPeak = 0;
   app.silenceWatchdog = setTimeout(async () => {
-    if (app.sawRealAudio || !isActive()) return;
+    if (!isActive()) return;
+
+    /*
+     * Weak but not dead: the device works, the level is simply too low to
+     * survive browser audio processing. Reopening raw is the fix, not a
+     * different device.
+     */
+    const WEAK_PEAK = 1200;                       // ~0.037 of full scale
+    if (app.sawRealAudio && app.maxRawPeak < WEAK_PEAK && !app.rawAudioRetried) {
+      await retryWithRawAudio(
+        `This microphone is very quiet (peak ${app.maxRawPeak} of 32767).`
+      );
+      return;
+    }
+    if (app.sawRealAudio) return;                 // healthy level: nothing to do
 
     const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
     const inputs = devices.filter(
@@ -1249,6 +1308,8 @@ const app = {
   autoSwitching: false,
   connectTimeout: null,
   sawRealAudio: false,
+  maxRawPeak: 0,
+  rawAudioRetried: false,
   config: null,
   intentionalClose: false,
 };
@@ -1319,11 +1380,19 @@ async function startVoiceSession() {
      * switching it off was another route for the output setting to change how
      * capture behaved.
      */
-    const audio = {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    };
+    /*
+     * Browser audio processing is tuned for a microphone at normal level. A
+     * very quiet array — one measured at 589 of 32767, about ten times below
+     * normal speech — can have its speech classified as noise and removed,
+     * so the track stays live while carrying nothing usable.
+     *
+     * Processing is therefore on by default and switched OFF automatically
+     * when the signal turns out to be too weak to survive it. Output settings
+     * never influence any of this.
+     */
+    const audio = app.rawAudioRetried
+      ? { echoCancellation: false, noiseSuppression: false, autoGainControl: true }
+      : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
     // An explicitly chosen device wins over the operating system default,
     // which is often the wrong microphone on laptops with a headset paired —
     // and never the Bluetooth device the caller is listening on, because
@@ -1653,6 +1722,8 @@ async function startMicrophoneStream() {
      */
     const peak = measurePeak(int16);
     if (peak > 60) app.sawRealAudio = true;   // anything above dead silence
+    if (peak > app.maxRawPeak) app.maxRawPeak = peak;
+    reportLiveLevel(peak);
 
     // Follow the loudest recent sound, and separately track how quiet this
     // microphone gets, so both gain and the gate adapt to the hardware.
