@@ -31,6 +31,9 @@ const ECHO_GUARD_MS = 350;          // ignore voice activity while the agent is 
 // How long after the agent stops to keep the microphone gated on speakers.
 // Covers the room's reverb tail, which the recogniser would otherwise hear.
 const MIC_GATE_TAIL_MS = 250;
+// How long a session may receive pure digital silence before the caller is
+// told their microphone is producing nothing.
+const SILENCE_WATCHDOG_MS = 5000;
 const TOOL_RESULT_MAX_HOLD_MS = 2500;
 const PLAYBACK_LEAD_SECONDS = 0.06;
 
@@ -432,7 +435,17 @@ async function refreshMicList() {
     if (device.deviceId === 'default') return;
     const option = document.createElement('option');
     option.value = device.deviceId;
-    option.textContent = device.label || `Microphone ${index + 1}`;
+    const label = device.label || `Microphone ${index + 1}`;
+    /*
+     * Flag the Bluetooth A2DP endpoint. Bluetooth cannot carry high-quality
+     * audio and a microphone simultaneously: the "Headphones (X)" endpoint is
+     * playback only and captures pure silence, while "Headset (X Hands-Free)"
+     * has a working microphone at reduced playback quality. Naming that here
+     * saves the caller from choosing a device that can never work.
+     */
+    const a2dpOnly = /headphone/i.test(label) && !/hands[- ]?free|headset/i.test(label);
+    option.textContent = a2dpOnly ? `${label} — no microphone` : label;
+    option.dataset.a2dpOnly = a2dpOnly ? 'true' : 'false';
     el.micSelect.appendChild(option);
   });
 
@@ -639,6 +652,63 @@ async function testMicrophone() {
       'check Windows Settings → System → Sound → Input and test it there.',
       'bad'
     );
+  }
+}
+
+/**
+ * Watch for a microphone that is delivering literal digital silence.
+ *
+ * The commonest cause is a Bluetooth headset. Bluetooth cannot do
+ * high-quality audio and a microphone at the same time: A2DP gives good
+ * playback and NO microphone, HFP gives a microphone and poor playback.
+ * Windows exposes them as separate endpoints — "Headphones (X)" for A2DP and
+ * "Headset (X Hands-Free)" for HFP. Capturing from the A2DP endpoint yields
+ * an endless stream of zeros, and the page used to sit there saying
+ * "Connected — Arin is ready" while nothing could ever be heard.
+ *
+ * This says what happened and offers the devices that would actually work.
+ */
+function startSilenceWatchdog() {
+  stopSilenceWatchdog();
+  app.sawRealAudio = false;
+  app.silenceWatchdog = setTimeout(async () => {
+    if (app.sawRealAudio || !isActive()) return;
+
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    const inputs = devices.filter(
+      (d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'communications'
+    );
+    const current = inputs.find((d) => d.deviceId === (el.micSelect && el.micSelect.value));
+    const currentLabel = (current && current.label) || 'the selected microphone';
+
+    const alternatives = inputs.filter((d) => d.deviceId !== (el.micSelect && el.micSelect.value));
+    const handsFree = alternatives.find((d) => /hands[- ]?free|headset/i.test(d.label || ''));
+    const builtIn = alternatives.find((d) => /array|internal|built[- ]?in|realtek|cam/i.test(d.label || ''));
+    const suggestion = handsFree || builtIn || alternatives[0];
+
+    let message =
+      `No sound at all is reaching the browser from ${currentLabel}. `;
+
+    if (/bluetooth|headphone/i.test(currentLabel)) {
+      message +=
+        'Bluetooth cannot provide high-quality audio and a microphone at the same '
+        + 'time, so a headset used for listening often has no working microphone. ';
+    }
+    if (suggestion && suggestion.label) {
+      message += `Try selecting "${suggestion.label}" as the microphone above, then press Reconnect.`;
+    } else {
+      message += 'Check that the microphone is not muted in Windows sound settings.';
+    }
+
+    showError(message);
+    setMicHint('No audio from this microphone — pick a different one above.', 'bad');
+  }, SILENCE_WATCHDOG_MS);
+}
+
+function stopSilenceWatchdog() {
+  if (app.silenceWatchdog) {
+    clearTimeout(app.silenceWatchdog);
+    app.silenceWatchdog = null;
   }
 }
 
@@ -1019,6 +1089,8 @@ const app = {
   analyserTimer: null,
   micTest: null,
   streamSink: null,
+  silenceWatchdog: null,
+  sawRealAudio: false,
   hindiSpeaker: null,
   speakerMode: true,   // half-duplex unless headphones are selected
   config: null,
@@ -1371,6 +1443,7 @@ async function startMicrophoneStream() {
      * it we send the real audio, so the caller can interrupt.
      */
     const peak = measurePeak(int16);
+    if (peak > 60) app.sawRealAudio = true;   // anything above dead silence
 
     // Follow the loudest recent sound, and separately track how quiet this
     // microphone gets, so both gain and the gate adapt to the hardware.
@@ -1482,6 +1555,7 @@ function handleServerEvent(message) {
   switch (message.type) {
 
     case 'session.ready': {
+      startSilenceWatchdog();
       app.sessionId = message.session_id || null;
       setState('connected');
       clearError();
@@ -1747,6 +1821,7 @@ function endVoiceSession() {
 async function teardown() {
   if (app.pendingTimer) { clearTimeout(app.pendingTimer); app.pendingTimer = null; }
   if (app.analyserTimer) { clearInterval(app.analyserTimer); app.analyserTimer = null; }
+  stopSilenceWatchdog();
   if (app.streamSink) {
     try { app.streamSink.pause(); app.streamSink.srcObject = null; } catch { /* noop */ }
     app.streamSink = null;

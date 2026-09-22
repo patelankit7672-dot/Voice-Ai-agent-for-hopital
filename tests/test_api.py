@@ -1198,3 +1198,33 @@ def test_quiet_microphones_are_amplified_before_sending():
     assert "Math.max(1, AGC_TARGET_PEAK" in app_js
     # And clamped, so a near-silent chunk cannot produce runaway gain.
     assert "Math.min(\n      AGC_MAX_GAIN" in app_js or "Math.min(AGC_MAX_GAIN" in app_js
+
+
+def test_silent_microphone_is_reported_not_ignored():
+    """
+    A Bluetooth headset cannot carry high-quality audio and a microphone at
+    the same time. Windows exposes the two profiles separately —
+    "Headphones (X)" is A2DP, playback only, and capturing from it yields an
+    endless stream of zeros; "Headset (X Hands-Free)" is HFP and has a
+    working microphone.
+
+    The page used to sit on "Connected — Arin is ready" while receiving
+    literal digital silence (observed: raw peak 0, analyser 0.0000). It must
+    say what happened and name a device that would work.
+
+    Verified in a browser with a silent stream and that exact device list:
+    the picker labelled the A2DP endpoint "— no microphone", and after the
+    watchdog window the error read "...Try selecting 'Headset (Nirvana Space
+    Hands-Free)' as the microphone above, then press Reconnect."
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "SILENCE_WATCHDOG_MS" in app_js
+    assert "startSilenceWatchdog" in app_js
+    assert "app.sawRealAudio" in app_js
+    # Names the real cause rather than a generic "check your microphone".
+    assert "Bluetooth cannot provide high-quality audio and a microphone" in app_js
+    # And flags the unusable endpoint in the picker itself.
+    assert "no microphone" in app_js
+    assert "hands[- ]?free" in app_js
