@@ -712,6 +712,73 @@ const timings = {
 };
 
 /**
+ * Refuse to put a Bluetooth headset into hands-free mode.
+ *
+ * Bluetooth carries ONE profile at a time. A2DP gives high-quality playback
+ * and no microphone; HFP gives a microphone and narrowband playback. Windows
+ * exposes them as separate endpoints that share a `groupId`, because they are
+ * the same physical device.
+ *
+ * Capturing from the headset therefore forces the whole device into HFP, and
+ * that does two things at once: the A2DP "Headphones" endpoint stops
+ * producing sound, so audio routed there is simply inaudible; and anything
+ * that does play comes through an 8-16 kHz narrowband channel, which sounds
+ * crackly. Both complaints, one cause.
+ *
+ * So when the caller is listening on a Bluetooth device, never capture from
+ * that same device if any other microphone exists.
+ *
+ * Returns the deviceId to capture from, or '' for the system default.
+ */
+async function resolveMicrophoneChoice() {
+  const chosen = (el.micSelect && el.micSelect.value) || '';
+  const wantedOutput = (el.outputSelect && el.outputSelect.value) || '';
+  if (!navigator.mediaDevices?.enumerateDevices) return chosen;
+
+  let devices;
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch {
+    return chosen;
+  }
+
+  const outputs = devices.filter((d) => d.kind === 'audiooutput');
+  const inputs = devices.filter(
+    (d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'communications'
+  );
+
+  // Which device are we listening on? An explicit pick, else the default.
+  const output = outputs.find((d) => d.deviceId === wantedOutput)
+    || outputs.find((d) => d.deviceId === 'default')
+    || outputs[0];
+  if (!output) return chosen;
+
+  const bluetoothOutput = /bluetooth|headphone|headset|airpod|buds/i.test(output.label || '');
+  if (!bluetoothOutput || !output.groupId) return chosen;
+
+  const micDevice = inputs.find((d) => d.deviceId === chosen);
+  const conflicts = (d) => d && d.groupId && d.groupId === output.groupId;
+
+  // An explicit pick that does not clash is respected as-is.
+  if (chosen && !conflicts(micDevice)) return chosen;
+  // The default might clash too, and we cannot inspect it directly, so only
+  // intervene when we can name a clearly independent alternative.
+  const independent = inputs.find(
+    (d) => d.groupId !== output.groupId && !/bluetooth/i.test(d.label || '')
+  );
+  if (!independent) return chosen;
+  if (!chosen && !inputs.some(conflicts)) return chosen;
+
+  if (el.micSelect) el.micSelect.value = independent.deviceId;
+  setMicHint(
+    `Using ${independent.label || 'the built-in microphone'} so your Bluetooth `
+    + 'headset stays in high-quality audio mode.',
+    null
+  );
+  return independent.deviceId;
+}
+
+/**
  * Watch for a microphone that is delivering literal digital silence.
  *
  * The commonest cause is a Bluetooth headset. Bluetooth cannot do
@@ -1327,8 +1394,11 @@ async function startVoiceSession() {
       autoGainControl: true,
     };
     // An explicitly chosen device wins over the operating system default,
-    // which is often the wrong microphone on laptops with a headset paired.
-    const chosen = el.micSelect && el.micSelect.value;
+    // which is often the wrong microphone on laptops with a headset paired —
+    // and never the Bluetooth device the caller is listening on, because
+    // capturing from it would force the headset into narrowband hands-free
+    // mode and silence the high-quality output endpoint.
+    const chosen = await resolveMicrophoneChoice();
     if (chosen) audio.deviceId = { exact: chosen };
 
     /*

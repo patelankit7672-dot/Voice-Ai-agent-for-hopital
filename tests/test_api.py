@@ -1384,3 +1384,34 @@ def test_barge_in_requires_sustained_speech_not_a_single_blip():
     assert "Math.max(noiseFloor * 6, 120)" not in app_js
     # The run must reset between turns rather than accumulating.
     assert "if (!agentIsAudible(MIC_GATE_TAIL_MS)) loudChunks = 0;" in app_js
+
+
+def test_bluetooth_profile_conflict_is_avoided():
+    """
+    "No Hindi audio at all" and "the voice cracks" were one cause.
+
+    Bluetooth carries ONE profile at a time. A2DP is high-quality playback
+    with no microphone; HFP is a microphone with 8-16 kHz narrowband
+    playback. Windows exposes them as separate endpoints sharing a groupId,
+    because they are the same physical device.
+
+    Capturing from the headset forces the device into HFP, which kills the
+    A2DP output endpoint — audio routed there is inaudible — and degrades
+    anything that does play to narrowband, which sounds crackly.
+
+    Verified in a browser with the reporter's topology (headset mic and
+    headset output sharing a groupId):
+      bluetooth output + bluetooth mic -> resolved to the built-in array
+      speaker output   + bluetooth mic -> respected, no conflict
+      bluetooth output + built-in mic  -> left alone
+      bluetooth output, no other input -> respected, nothing to switch to
+    """
+    app_js = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "async function resolveMicrophoneChoice()" in app_js
+    # The link between the two endpoints is groupId, not the label.
+    assert "d.groupId === output.groupId" in app_js or "d.groupId !== output.groupId" in app_js
+    assert "const chosen = await resolveMicrophoneChoice();" in app_js
+    # Only intervene when there is a genuinely independent alternative.
+    assert "if (!independent) return chosen;" in app_js
